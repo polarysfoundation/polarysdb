@@ -28,6 +28,8 @@ type Database struct {
 	key    common.Key
 }
 
+// Init initializes the database with the given encryption key and directory path.
+// It creates the necessary directories if they do not exist and loads the database from the file.
 func Init(keyDb string, dirPath string) (*Database, error) {
 	path := config.GetStateDBPath(dirPath)
 
@@ -52,6 +54,7 @@ func Init(keyDb string, dirPath string) (*Database, error) {
 	return db, nil
 }
 
+// Exist checks if a table exists in the database.
 func (db *Database) Exist(table string) bool {
 	db.mutex.Lock()
 	defer db.mutex.Unlock()
@@ -61,6 +64,8 @@ func (db *Database) Exist(table string) bool {
 	return ok
 }
 
+// Create creates a new record in the specified table with the given key and value.
+// If the table does not exist, it is created.
 func (db *Database) Create(table, key string, value interface{}) error {
 	db.mutex.Lock()
 	defer db.mutex.Unlock()
@@ -73,6 +78,8 @@ func (db *Database) Create(table, key string, value interface{}) error {
 	return db.save()
 }
 
+// Write updates an existing record in the specified table with the given key and value.
+// Returns an error if the table does not exist.
 func (db *Database) Write(table, key string, value interface{}) error {
 	db.mutex.Lock()
 	defer db.mutex.Unlock()
@@ -84,6 +91,8 @@ func (db *Database) Write(table, key string, value interface{}) error {
 	return db.save()
 }
 
+// Delete removes a record from the specified table with the given key.
+// Returns an error if the table does not exist.
 func (db *Database) Delete(table, key string) error {
 	db.mutex.Lock()
 	defer db.mutex.Unlock()
@@ -95,6 +104,8 @@ func (db *Database) Delete(table, key string) error {
 	return fmt.Errorf("table %s does not exist", table)
 }
 
+// Read retrieves a record from the specified table with the given key.
+// Returns the value and a boolean indicating if the key exists.
 func (db *Database) Read(table, key string) (interface{}, bool) {
 	db.mutex.Lock()
 	defer db.mutex.Unlock()
@@ -106,6 +117,8 @@ func (db *Database) Read(table, key string) (interface{}, bool) {
 	return nil, false
 }
 
+// ReadBatch retrieves all records from the specified table.
+// Returns a slice of values.
 func (db *Database) ReadBatch(table string) []interface{} {
 	db.mutex.Lock()
 	defer db.mutex.Unlock()
@@ -124,6 +137,7 @@ func (db *Database) ReadBatch(table string) []interface{} {
 	return v
 }
 
+// save serializes the database data to JSON, encrypts it, and writes it to the file.
 func (db *Database) save() error {
 	data, err := json.Marshal(db.data)
 	if err != nil {
@@ -138,6 +152,7 @@ func (db *Database) save() error {
 	return os.WriteFile(db.dbPath, encryptedData, 0644)
 }
 
+// load reads the encrypted database file, decrypts it, and deserializes the JSON data into the database.
 func (db *Database) load() error {
 	if _, err := os.Stat(db.dbPath); os.IsNotExist(err) {
 		return nil // Si el archivo no existe, es un caso válido
@@ -156,7 +171,7 @@ func (db *Database) load() error {
 	return json.Unmarshal(decryptedData, &db.data)
 }
 
-// Función para encriptar datos con AES
+// encrypt encrypts the given data using AES encryption with the provided key.
 func encrypt(data []byte, key common.Key) ([]byte, error) {
 	block, err := aes.NewCipher(key.KeyToByte())
 	if err != nil {
@@ -176,7 +191,7 @@ func encrypt(data []byte, key common.Key) ([]byte, error) {
 	return gcm.Seal(nonce, nonce, data, nil), nil
 }
 
-// Función para desencriptar datos con AES
+// decrypt decrypts the given encrypted data using AES decryption with the provided key.
 func decrypt(encryptedData []byte, key common.Key) ([]byte, error) {
 	block, err := aes.NewCipher(key.KeyToByte())
 	if err != nil {
