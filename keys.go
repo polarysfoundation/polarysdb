@@ -18,7 +18,6 @@ func GenerateKey() common.Key {
 	}
 
 	h := pm256.Sum256(b)
-{}
 	return common.BytesToKey(h[:])
 }
 
