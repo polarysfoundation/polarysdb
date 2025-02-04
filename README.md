@@ -100,6 +100,26 @@ func (db *Database) ReadBatch(table string) []interface{}
 
 Reads all records from the specified table.
 
+## Security Key
+
+The security key is a 32-byte key used to encrypt and decrypt information stored in the database.
+
+### GenerateKey
+
+```go
+func GenerateKey() Key{}
+```
+
+generate a new 32-bytes key
+
+### GenerateKeyFromBytes
+
+```go
+func GenerateKeyFromBytes(b []byte) Key{}
+```
+
+generate a new 32-bytes key from bytes
+
 ## Usage
 
 To use these functions and the database, import the `common` and `polarysdb` packages and call the desired function with the appropriate parameters. Below is an example:
