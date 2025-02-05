@@ -1,5 +1,6 @@
 package common
 
+
 // keyLen defines the length of the Key in bytes.
 const keyLen = 32
 
@@ -16,6 +17,10 @@ func BytesToKey(b []byte) Key {
 // StringToKey converts a string to a Key.
 func StringToKey(s string) Key {
 	return BytesToKey([]byte(s))
+}
+
+func (k Key) KeyToString() string {
+	return string(k[:])
 }
 
 // KeyToByte converts a Key to a byte slice.

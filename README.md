@@ -129,15 +129,14 @@ package main
 
 import (
     "fmt"
-    "github.com/polarysfoundation/polarys_db/modules/common"
     "github.com/polarysfoundation/polarys_db"
 )
 
 func main() {
-    key := common.StringToKey("examplekey")
-    fmt.Println(key.KeyToByte())
+    key := GenerateKey()
+    fmt.Printf("key: %s", key.KeyToString())
 
-    db, err := polarysdb.Init("examplekey", "./data")
+    db, err := polarysdb.Init(key.KeyToString(), "./data")
     if err != nil {
         fmt.Println("Error initializing database:", err)
         return
@@ -163,7 +162,6 @@ This example converts a string to a `Key`, initializes the database, creates a n
 To install the package, use the following command:
 
 ```sh
-go get github.com/polarysfoundation/polarys_db/modules/common
 go get github.com/polarysfoundation/polarys_db
 ```
 
