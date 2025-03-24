@@ -23,14 +23,14 @@ import (
 // - key: a common.Key used for database operations.
 type Database struct {
 	dbPath string
-	data   map[string]map[string]interface{}
-	mutex  sync.Mutex
+	data   map[string]map[string]any
+	mutex  sync.RWMutex
 	key    common.Key
 }
 
 // Init initializes the database with the given encryption key and directory path.
 // It creates the necessary directories if they do not exist and loads the database from the file.
-func Init(keyDb string, dirPath string) (*Database, error) {
+func Init(keyDb common.Key, dirPath string) (*Database, error) {
 	path := config.GetStateDBPath(dirPath)
 
 	dir := filepath.Dir(path)
@@ -43,8 +43,8 @@ func Init(keyDb string, dirPath string) (*Database, error) {
 
 	db := &Database{
 		dbPath: path,
-		data:   make(map[string]map[string]interface{}),
-		key:    common.StringToKey(keyDb), // Usar la clave de cifrado proporcionada
+		data:   make(map[string]map[string]any),
+		key:    keyDb, // Usar la clave de cifrado proporcionada
 	}
 
 	if err := db.load(); err != nil {
@@ -56,31 +56,30 @@ func Init(keyDb string, dirPath string) (*Database, error) {
 
 // Exist checks if a table exists in the database.
 func (db *Database) Exist(table string) bool {
-	db.mutex.Lock()
-	defer db.mutex.Unlock()
+	db.mutex.RLock()
+	defer db.mutex.RUnlock()
 
-	_, ok := db.data[table]
-
-	return ok
+	if _, ok := db.data[table]; ok {
+		return true
+	}
+	return false
 }
 
-// Create creates a new record in the specified table with the given key and value.
-// If the table does not exist, it is created.
-func (db *Database) Create(table, key string, value interface{}) error {
+// Create creates a new table in the database.
+func (db *Database) Create(table string) error {
 	db.mutex.Lock()
 	defer db.mutex.Unlock()
 
 	if _, ok := db.data[table]; !ok {
-		db.data[table] = make(map[string]interface{})
+		db.data[table] = make(map[string]any)
 	}
-	db.data[table][key] = value
 
 	return db.save()
 }
 
 // Write updates an existing record in the specified table with the given key and value.
 // Returns an error if the table does not exist.
-func (db *Database) Write(table, key string, value interface{}) error {
+func (db *Database) Write(table, key string, value any) error {
 	db.mutex.Lock()
 	defer db.mutex.Unlock()
 
@@ -106,9 +105,9 @@ func (db *Database) Delete(table, key string) error {
 
 // Read retrieves a record from the specified table with the given key.
 // Returns the value and a boolean indicating if the key exists.
-func (db *Database) Read(table, key string) (interface{}, bool) {
-	db.mutex.Lock()
-	defer db.mutex.Unlock()
+func (db *Database) Read(table, key string) (any, bool) {
+	db.mutex.RLock()
+	defer db.mutex.RUnlock()
 
 	if t, ok := db.data[table]; ok {
 		value, exists := t[key]
@@ -119,22 +118,22 @@ func (db *Database) Read(table, key string) (interface{}, bool) {
 
 // ReadBatch retrieves all records from the specified table.
 // Returns a slice of values.
-func (db *Database) ReadBatch(table string) []interface{} {
-	db.mutex.Lock()
-	defer db.mutex.Unlock()
+func (db *Database) ReadBatch(table string) ([]any, error) {
+	db.mutex.RLock()
+	defer db.mutex.RUnlock()
 
-	v := make([]interface{}, 0)
+	v := make([]any, 0)
 
 	t, ok := db.data[table]
 	if !ok {
-		return nil
+		return nil, fmt.Errorf("table %s does not exist", table)
 	}
 
 	for _, d := range t {
 		v = append(v, d)
 	}
 
-	return v
+	return v, nil
 }
 
 // save serializes the database data to JSON, encrypts it, and writes it to the file.
