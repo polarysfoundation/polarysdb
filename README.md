@@ -133,7 +133,7 @@ import (
 )
 
 func main() {
-    key := GenerateKey()
+    key := polarysdb.GenerateKey()
     fmt.Printf("key: %s", key.KeyToString())
 
     db, err := polarysdb.Init(key.KeyToString(), "./data")
