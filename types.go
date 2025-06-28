@@ -1,12 +1,8 @@
 package polarysdb
 
 import (
-	"crypto/aes"
-	"crypto/cipher"
-	"crypto/rand"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -14,6 +10,7 @@ import (
 
 	"github.com/polarysfoundation/polarys_db/modules/common"
 	"github.com/polarysfoundation/polarys_db/modules/config"
+	"github.com/polarysfoundation/polarys_db/modules/crypto"
 )
 
 // Database represents a simple in-memory database structure.
@@ -188,7 +185,7 @@ func (db *Database) save() error {
 		return err
 	}
 
-	encryptedData, err := encrypt(data, db.key)
+	encryptedData, err := crypto.Encrypt(data, db.key)
 	if err != nil {
 		return err
 	}
@@ -211,7 +208,7 @@ func (db *Database) load() error {
 		return err
 	}
 
-	decryptedData, err := decrypt(encryptedData, db.key)
+	decryptedData, err := crypto.Decrypt(encryptedData, db.key)
 	if err != nil {
 		return err
 	}
@@ -226,50 +223,9 @@ func (db *Database) load() error {
 	return nil
 }
 
-// encrypt encrypts the given data using AES encryption with the provided key.
-func encrypt(data []byte, key common.Key) ([]byte, error) {
-	block, err := aes.NewCipher(key.KeyToByte())
-	if err != nil {
-		return nil, err
-	}
-
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, err
-	}
-
-	nonce := make([]byte, gcm.NonceSize())
-	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
-		return nil, err
-	}
-
-	return gcm.Seal(nonce, nonce, data, nil), nil
-}
-
 // Close stops the file change watcher goroutine.
 func (db *Database) Close() {
 	if db.stopWatch != nil {
 		close(db.stopWatch)
 	}
-}
-
-// decrypt decrypts the given encrypted data using AES decryption with the provided key.
-func decrypt(encryptedData []byte, key common.Key) ([]byte, error) {
-	block, err := aes.NewCipher(key.KeyToByte())
-	if err != nil {
-		return nil, err
-	}
-
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, err
-	}
-
-	nonceSize := gcm.NonceSize()
-	if len(encryptedData) < nonceSize {
-		return nil, fmt.Errorf("invalid encrypted data")
-	}
-
-	nonce, ciphertext := encryptedData[:nonceSize], encryptedData[nonceSize:]
-	return gcm.Open(nil, nonce, ciphertext, nil)
 }
