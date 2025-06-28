@@ -145,7 +145,6 @@ func (db *Database) ReadBatch(table string) ([]any, error) {
 	return v, nil
 }
 
-
 // fileOnChange monitors the database file for external changes and reloads it if a change is detected.
 func (db *Database) fileOnChange() {
 	// Create a new ticker that ticks every 3 seconds.
@@ -171,9 +170,9 @@ func (db *Database) fileOnChange() {
 			db.mutex.Unlock()
 
 			if err != nil {
-				fmt.Println("⚠️ Error recargando base de datos:", err)
+				fmt.Println("⚠️ Error updating database:", err)
 			} else {
-				fmt.Println("📥 Base de datos actualizada desde disco.")
+				fmt.Println("📥 Database updated successfully.")
 			}
 		// If the stopWatch channel receives a signal, exit the goroutine.
 		case <-db.stopWatch:
