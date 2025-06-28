@@ -100,6 +100,14 @@ func (db *Database) ReadBatch(table string) []interface{}
 
 Reads all records from the specified table.
 
+### Close
+
+```go
+func (db *Database) Close() error
+```
+
+Closes the database.
+
 ## Security Key
 
 The security key is a 32-byte key used to encrypt and decrypt information stored in the database.
