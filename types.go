@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/polarysfoundation/polarys_db/modules/common"
 	"github.com/polarysfoundation/polarys_db/modules/config"
@@ -21,11 +22,15 @@ import (
 // - data: a nested map structure to store the database records.
 // - mutex: a sync.Mutex to ensure thread-safe access to the database.
 // - key: a common.Key used for database operations.
+// - lastLoaded: a time.Time indicating the last time the database was loaded.
+// - stopWatch: a channel used to signal when the database should stop watching for changes.
 type Database struct {
-	dbPath string
-	data   map[string]map[string]any
-	mutex  sync.RWMutex
-	key    common.Key
+	dbPath     string
+	data       map[string]map[string]any
+	mutex      sync.RWMutex
+	key        common.Key
+	lastLoaded time.Time
+	stopWatch  chan struct{}
 }
 
 // Init initializes the database with the given encryption key and directory path.
@@ -35,21 +40,25 @@ func Init(keyDb common.Key, dirPath string) (*Database, error) {
 
 	dir := filepath.Dir(path)
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
-		err := os.MkdirAll(dir, os.ModePerm)
-		if err != nil {
+		if err := os.MkdirAll(dir, os.ModePerm); err != nil {
 			return nil, err
 		}
 	}
 
 	db := &Database{
-		dbPath: path,
-		data:   make(map[string]map[string]any),
-		key:    keyDb, // Usar la clave de cifrado proporcionada
+		dbPath:    path,
+		data:      make(map[string]map[string]any),
+		key:       keyDb,
+		stopWatch: make(chan struct{}),
 	}
 
+	// Cargar por primera vez
 	if err := db.load(); err != nil {
 		return nil, err
 	}
+
+	// Iniciar el watcher de cambios externos
+	go db.fileOnChange()
 
 	return db, nil
 }
@@ -136,6 +145,43 @@ func (db *Database) ReadBatch(table string) ([]any, error) {
 	return v, nil
 }
 
+
+// fileOnChange monitors the database file for external changes and reloads it if a change is detected.
+func (db *Database) fileOnChange() {
+	// Create a new ticker that ticks every 3 seconds.
+	ticker := time.NewTicker(3 * time.Second)
+	// Ensure the ticker is stopped when the function exits.
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			// Get file information for the database path.
+			info, err := os.Stat(db.dbPath)
+			// If there's an error getting file info or the modification time hasn't changed, continue to the next tick.
+			if err != nil || info.ModTime().Equal(db.lastLoaded) {
+				continue
+			}
+
+			// The file has changed, reload it.
+			// Acquire a write lock to prevent concurrent access during reload.
+			db.mutex.Lock()
+			err = db.load()
+			// Release the lock after loading.
+			db.mutex.Unlock()
+
+			if err != nil {
+				fmt.Println("⚠️ Error recargando base de datos:", err)
+			} else {
+				fmt.Println("📥 Base de datos actualizada desde disco.")
+			}
+		// If the stopWatch channel receives a signal, exit the goroutine.
+		case <-db.stopWatch:
+			return
+		}
+	}
+}
+
 // save serializes the database data to JSON, encrypts it, and writes it to the file.
 func (db *Database) save() error {
 	data, err := json.Marshal(db.data)
@@ -153,8 +199,12 @@ func (db *Database) save() error {
 
 // load reads the encrypted database file, decrypts it, and deserializes the JSON data into the database.
 func (db *Database) load() error {
-	if _, err := os.Stat(db.dbPath); os.IsNotExist(err) {
-		return nil // Si el archivo no existe, es un caso válido
+	info, err := os.Stat(db.dbPath)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
 	}
 
 	encryptedData, err := os.ReadFile(db.dbPath)
@@ -167,7 +217,14 @@ func (db *Database) load() error {
 		return err
 	}
 
-	return json.Unmarshal(decryptedData, &db.data)
+	var newData map[string]map[string]any
+	if err := json.Unmarshal(decryptedData, &newData); err != nil {
+		return err
+	}
+
+	db.data = newData
+	db.lastLoaded = info.ModTime()
+	return nil
 }
 
 // encrypt encrypts the given data using AES encryption with the provided key.
@@ -188,6 +245,13 @@ func encrypt(data []byte, key common.Key) ([]byte, error) {
 	}
 
 	return gcm.Seal(nonce, nonce, data, nil), nil
+}
+
+// Close stops the file change watcher goroutine.
+func (db *Database) Close() {
+	if db.stopWatch != nil {
+		close(db.stopWatch)
+	}
 }
 
 // decrypt decrypts the given encrypted data using AES decryption with the provided key.
