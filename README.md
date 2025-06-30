@@ -47,7 +47,7 @@ The `Database` struct represents a simple in-memory database with encryption sup
 ### Init
 
 ```go
-func Init(keyDb string, dirPath string) (*Database, error)
+func Init(keyDb common.Key, dirPath string) (*Database, error)
 ```
 
 Initializes a new `Database` instance with the provided encryption key and directory path.
@@ -130,36 +130,50 @@ generate a new 32-bytes key from bytes
 
 ## Usage
 
-To use these functions and the database, import the `common` and `polarysdb` packages and call the desired function with the appropriate parameters. Below is an example:
+To use the database, import the `polarysdb` package. Below is an example demonstrating how to initialize the database, create a table, write a record, and read it back.
 
 ```go
 package main
 
 import (
-    "fmt"
-    "github.com/polarysfoundation/polarys_db"
+	"fmt"
+
+	"github.com/polarysfoundation/polarys_db"
 )
 
 func main() {
-    key := polarysdb.GenerateKey()
-    fmt.Printf("key: %s", key.KeyToString())
+	// Generate a new encryption key for the database.
+	key := polarysdb.GenerateKey()
+	fmt.Println("Generated a new database key.")
 
-    db, err := polarysdb.Init(key.KeyToString(), "./data")
-    if err != nil {
-        fmt.Println("Error initializing database:", err)
-        return
-    }
+	// Initialize the database. This will create the db file if it doesn't exist.
+	db, err := polarysdb.Init(key, "./data")
+	if err != nil {
+		fmt.Println("Error initializing database:", err)
+		return
+	}
+	defer db.Close() // Ensure the file watcher is stopped when main exits.
 
-    err = db.Create("users", "user1", map[string]interface{}{"name": "John Doe"})
-    if err != nil {
-        fmt.Println("Error creating record:", err)
-        return
-    }
+	// 1. Create a new table called "users".
+	if err := db.Create("users"); err != nil {
+		fmt.Println("Error creating table:", err)
+		return
+	}
 
-    user, exists := db.Read("users", "user1")
-    if exists {
-        fmt.Println("User:", user)
-    }
+	// 2. Write a record to the "users" table.
+	userData := map[string]any{"name": "John Doe", "email": "john.doe@example.com"}
+	if err := db.Write("users", "user1", userData); err != nil {
+		fmt.Println("Error writing record:", err)
+		return
+	}
+	fmt.Println("Successfully wrote record for user1.")
+
+	// 3. Read the record back from the database.
+	user, exists := db.Read("users", "user1")
+	if !exists {
+		fmt.Println("Failed to read record for user1.")
+		return
+	}
 }
 ```
 
