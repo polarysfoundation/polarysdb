@@ -108,6 +108,23 @@ func (db *Database) Close() error
 
 Closes the database.
 
+### Export && ExportEncrypted
+
+```go
+func (db *Database) Export(key common.Key, path string) error
+func (db *Database) ExportEncrypted(key common.Key, path string) error
+```
+
+Export && ExportEncrypted
+
+### Import && ImportEncrypted
+```go
+func (db *Database) Import(key common.Key, path string) error
+func (db *Database) ImportEncrypted(key common.Key, path string) error
+```
+
+Import && ImportEncrypted
+
 ## Security Key
 
 The security key is a 32-byte key used to encrypt and decrypt information stored in the database.
