@@ -11,13 +11,14 @@ import (
 	"github.com/polarysfoundation/polarys_db/modules/common"
 	"github.com/polarysfoundation/polarys_db/modules/config"
 	"github.com/polarysfoundation/polarys_db/modules/crypto"
+	"github.com/polarysfoundation/polarys_db/modules/logger"
 )
 
 // Database represents a simple in-memory database structure.
 // It contains the following fields:
 // - dbPath: a string representing the path to the database.
 // - data: a nested map structure to store the database records.
-// - mutex: a sync.Mutex to ensure thread-safe access to the database.
+// - mutex: a sync.RWMutex to ensure thread-safe access to the database.
 // - key: a common.Key used for database operations.
 // - lastLoaded: a time.Time indicating the last time the database was loaded.
 // - stopWatch: a channel used to signal when the database should stop watching for changes.
@@ -49,12 +50,12 @@ func Init(keyDb common.Key, dirPath string) (*Database, error) {
 		stopWatch: make(chan struct{}),
 	}
 
-	// Cargar por primera vez
+	// Load for the first time
 	if err := db.load(); err != nil {
 		return nil, err
 	}
 
-	// Iniciar el watcher de cambios externos
+	// Start the external change watcher
 	go db.fileOnChange()
 
 	return db, nil
@@ -142,6 +143,116 @@ func (db *Database) ReadBatch(table string) ([]any, error) {
 	return v, nil
 }
 
+// Export saves the current in-memory database to a plain, unencrypted JSON file.
+func (db *Database) Export(key common.Key, path string) error {
+	db.mutex.RLock()
+	defer db.mutex.RUnlock()
+
+	if !common.IsEqual(key[:], db.key[:]) {
+		return fmt.Errorf("unauthorized access to export database")
+	}
+
+	data, err := json.MarshalIndent(db.data, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(path, data, 0600)
+}
+
+// Import loads data from a plain, unencrypted JSON file into the in-memory database,
+// replacing its current content, and then saves the encrypted database to disk.
+func (db *Database) Import(key common.Key, path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+
+	if !common.IsEqual(key[:], db.key[:]) {
+		return fmt.Errorf("unauthorized access to export database")
+	}
+
+	var importedData map[string]map[string]any
+	if err := json.Unmarshal(data, &importedData); err != nil {
+		return err
+	}
+
+	for table, records := range importedData {
+		if table == "" {
+			return fmt.Errorf("invalid table name in import file")
+		}
+		if records == nil {
+			return fmt.Errorf("invalid record data for table %s", table)
+		}
+	}
+
+	db.mutex.Lock()
+	db.data = importedData
+	db.mutex.Unlock()
+
+	return db.save()
+}
+
+// ExportEncrypted saves the current in-memory database to an encrypted JSON file.
+func (db *Database) ExportEncrypted(key common.Key, path string) error {
+	db.mutex.RLock()
+	defer db.mutex.RUnlock()
+
+	if !common.IsEqual(key[:], db.key[:]) {
+		return fmt.Errorf("unauthorized access to export database")
+	}
+
+	data, err := json.MarshalIndent(db.data, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	encryptedData, err := crypto.Encrypt(data, db.key)
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(path, encryptedData, 0600)
+}
+
+// ImportEncrypted loads data from an encrypted file into the in-memory database,
+// replacing its current content, and then saves the encrypted database to disk.
+func (db *Database) ImportEncrypted(key common.Key, path string) error {
+	encryptedData, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+
+	if !common.IsEqual(key[:], db.key[:]) {
+		return fmt.Errorf("unauthorized access to export database")
+	}
+
+	decryptedData, err := crypto.Decrypt(encryptedData, db.key)
+	if err != nil {
+		return err
+	}
+
+	var importedData map[string]map[string]any
+	if err := json.Unmarshal(decryptedData, &importedData); err != nil {
+		return err
+	}
+
+	for table, records := range importedData {
+		if table == "" {
+			return fmt.Errorf("invalid table name in import file")
+		}
+		if records == nil {
+			return fmt.Errorf("invalid record data for table %s", table)
+		}
+	}
+
+	db.mutex.Lock()
+	db.data = importedData
+	db.mutex.Unlock()
+
+	return db.save()
+}
+
 // fileOnChange monitors the database file for external changes and reloads it if a change is detected.
 func (db *Database) fileOnChange() {
 	// Create a new ticker that ticks every 3 seconds.
@@ -154,8 +265,17 @@ func (db *Database) fileOnChange() {
 		case <-ticker.C:
 			// Get file information for the database path.
 			info, err := os.Stat(db.dbPath)
-			// If there's an error getting file info or the modification time hasn't changed, continue to the next tick.
-			if err != nil || info.ModTime().Equal(db.lastLoaded) {
+			if err != nil {
+				// If the file does not exist, it might be created later.
+				// For other errors, log them but continue, as they might be transient.
+				if !os.IsNotExist(err) {
+					logger.Error("error stating database file for changes: ", err)
+				}
+				continue
+			}
+
+			// If the modification time hasn't changed, there's nothing to do.
+			if info.ModTime().Equal(db.lastLoaded) && !db.lastLoaded.IsZero() {
 				continue
 			}
 
@@ -163,13 +283,12 @@ func (db *Database) fileOnChange() {
 			// Acquire a write lock to prevent concurrent access during reload.
 			db.mutex.Lock()
 			err = db.load()
-			// Release the lock after loading.
 			db.mutex.Unlock()
 
 			if err != nil {
-				fmt.Println("⚠️ Error updating database:", err)
+				logger.Warn("Error reloading database from file: ", err)
 			} else {
-				fmt.Println("📥 Database updated successfully.")
+				logger.Info("Database reloaded from file successfully.")
 			}
 		// If the stopWatch channel receives a signal, exit the goroutine.
 		case <-db.stopWatch:
@@ -190,7 +309,7 @@ func (db *Database) save() error {
 		return err
 	}
 
-	return os.WriteFile(db.dbPath, encryptedData, 0644)
+	return os.WriteFile(db.dbPath, encryptedData, 0600)
 }
 
 // load reads the encrypted database file, decrypts it, and deserializes the JSON data into the database.
