@@ -118,12 +118,21 @@ func (db *Database) ExportEncrypted(key common.Key, path string) error
 Export && ExportEncrypted
 
 ### Import && ImportEncrypted
+
 ```go
 func (db *Database) Import(key common.Key, path string) error
 func (db *Database) ImportEncrypted(key common.Key, path string) error
 ```
 
 Import && ImportEncrypted
+
+### ChangeKey
+
+```go
+func (db *Database) ChangeKey(oldKey, newKey common.Key) error
+```
+
+ChangeKey update database key.
 
 ## Security Key
 
