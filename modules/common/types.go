@@ -18,12 +18,18 @@ func StringToKey(s string) Key {
 	return BytesToKey([]byte(s))
 }
 
-func (k Key) KeyToString() string {
-	return string(k[:])
+// String converts a Key to a string.
+func (k Key) String() string {
+	return string(k.hex())
+}
+
+// Hex converts a Key to a hexadecimal string.
+func (k Key) Hex() string {
+	return string(k.hex())
 }
 
 // KeyToByte converts a Key to a byte slice.
-func (k Key) KeyToByte() []byte {
+func (k Key) Bytes() []byte {
 	return k[:]
 }
 
@@ -43,4 +49,12 @@ func (a *Key) SetBytes(b []byte) {
 	}
 
 	copy(a[keyLen-len(b):], b)
+}
+
+// hex returns the hexadecimal representation of the Key, prefixed with "0x".
+func (k Key) hex() []byte {
+	buf := make([]byte, len(k)*2+2)
+	copy(buf[:2], []byte("0x"))
+	encode(buf[2:], k[:])
+	return buf
 }

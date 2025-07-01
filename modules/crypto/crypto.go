@@ -12,7 +12,7 @@ import (
 
 // encrypt encrypts the given data using AES encryption with the provided key.
 func Encrypt(data []byte, key common.Key) ([]byte, error) {
-	block, err := aes.NewCipher(key.KeyToByte())
+	block, err := aes.NewCipher(key.Bytes())
 	if err != nil {
 		return nil, err
 	}
@@ -32,7 +32,7 @@ func Encrypt(data []byte, key common.Key) ([]byte, error) {
 
 // decrypt decrypts the given encrypted data using AES decryption with the provided key.
 func Decrypt(encryptedData []byte, key common.Key) ([]byte, error) {
-	block, err := aes.NewCipher(key.KeyToByte())
+	block, err := aes.NewCipher(key.Bytes())
 	if err != nil {
 		return nil, err
 	}

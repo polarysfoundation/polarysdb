@@ -43,7 +43,7 @@ func TestKeyToString(t *testing.T) {
 	k := StringToKey("teststring")
 	expected := "teststring"
 
-	result := k.KeyToString()
+	result := k.String()
 
 	// Debugging: Print lengths and byte representations
 	log.Printf("Length of result: %d", len(result))
@@ -75,7 +75,7 @@ func TestKeyToByte(t *testing.T) {
 	k := StringToKey("teststring")
 	expected := []byte("teststring")
 
-	result := k.KeyToByte()
+	result := k.Bytes()
 
 	log.Print(result)
 	log.Printf("Length of result: %d", len(result))
