@@ -28,7 +28,7 @@ type Database struct {
 	mutex      sync.RWMutex
 	key        common.Key
 	lastLoaded time.Time
-	logger     logger.Logger
+	logger     *logger.Logger
 	stopWatch  chan struct{}
 }
 
@@ -56,7 +56,7 @@ func Init(keyDb common.Key, dirPath string) (*Database, error) {
 		data:      make(map[string]map[string]any),
 		key:       keyDb,
 		stopWatch: make(chan struct{}),
-		logger:    *l,
+		logger:    l,
 	}
 
 	// Load for the first time
