@@ -164,7 +164,7 @@ package main
 import (
 	"fmt"
 
-	"github.com/polarysfoundation/polarys_db"
+	"github.com/polarysfoundation/polarysdb"
 )
 
 func main() {
@@ -210,7 +210,7 @@ This example converts a string to a `Key`, initializes the database, creates a n
 To install the package, use the following command:
 
 ```sh
-go get github.com/polarysfoundation/polarys_db
+go get github.com/polarysfoundation/polarysdb
 ```
 
 ## License
