@@ -1,4 +1,4 @@
-module github.com/polarysfoundation/polarys_db
+module github.com/polarysfoundation/polarysdb
 
 go 1.23.3
 

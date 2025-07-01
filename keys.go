@@ -6,7 +6,7 @@ import (
 	"io"
 
 	pm256 "github.com/polarysfoundation/pm-256"
-	"github.com/polarysfoundation/polarys_db/modules/common"
+	"github.com/polarysfoundation/polarysdb/modules/common"
 )
 
 func GenerateKey() common.Key {

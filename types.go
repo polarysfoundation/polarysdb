@@ -8,10 +8,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/polarysfoundation/polarys_db/modules/common"
-	"github.com/polarysfoundation/polarys_db/modules/config"
-	"github.com/polarysfoundation/polarys_db/modules/crypto"
-	"github.com/polarysfoundation/polarys_db/modules/logger"
+	"github.com/polarysfoundation/polarysdb/modules/common"
+	"github.com/polarysfoundation/polarysdb/modules/config"
+	"github.com/polarysfoundation/polarysdb/modules/crypto"
+	"github.com/polarysfoundation/polarysdb/modules/logger"
 )
 
 // Database represents a simple in-memory database structure.

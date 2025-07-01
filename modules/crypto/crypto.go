@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/polarysfoundation/polarys_db/modules/common"
+	"github.com/polarysfoundation/polarysdb/modules/common"
 )
 
 // encrypt encrypts the given data using AES encryption with the provided key.

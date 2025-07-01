@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	pm256 "github.com/polarysfoundation/pm-256"
-	"github.com/polarysfoundation/polarys_db/modules/common"
+	"github.com/polarysfoundation/polarysdb/modules/common"
 )
 
 func TestGenerateKey(t *testing.T) {

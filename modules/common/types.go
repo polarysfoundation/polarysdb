@@ -1,6 +1,5 @@
 package common
 
-
 // keyLen defines the length of the Key in bytes.
 const keyLen = 32
 
@@ -26,6 +25,14 @@ func (k Key) KeyToString() string {
 // KeyToByte converts a Key to a byte slice.
 func (k Key) KeyToByte() []byte {
 	return k[:]
+}
+
+// HexToKey converts a hexadecimal string to a Key.
+func HexToKey(s string) Key {
+	if len(s) > 2 && s[:2] == "0x" {
+		s = s[2:]
+	}
+	return StringToKey(s)
 }
 
 // SetBytes sets the Key to the value of the given byte slice.
