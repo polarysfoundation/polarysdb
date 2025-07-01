@@ -28,6 +28,7 @@ type Database struct {
 	mutex      sync.RWMutex
 	key        common.Key
 	lastLoaded time.Time
+	logger     logger.Logger
 	stopWatch  chan struct{}
 }
 
@@ -42,12 +43,20 @@ func Init(keyDb common.Key, dirPath string) (*Database, error) {
 			return nil, err
 		}
 	}
+	// Initialize logger
+	logCfg := logger.Config{
+		MinLevel:  logger.LevelInfo,
+		ToConsole: true,
+		ToFile:    false,
+	}
+	l := logger.NewLogger(logCfg)
 
 	db := &Database{
 		dbPath:    path,
 		data:      make(map[string]map[string]any),
 		key:       keyDb,
 		stopWatch: make(chan struct{}),
+		logger:    *l,
 	}
 
 	// Load for the first time
@@ -282,7 +291,7 @@ func (db *Database) fileOnChange() {
 				// If the file does not exist, it might be created later.
 				// For other errors, log them but continue, as they might be transient.
 				if !os.IsNotExist(err) {
-					logger.Error("error stating database file for changes: ", err)
+					db.logger.Error("error stating database file for changes: ", err)
 				}
 				continue
 			}
@@ -299,9 +308,9 @@ func (db *Database) fileOnChange() {
 			db.mutex.Unlock()
 
 			if err != nil {
-				logger.Warn("Error reloading database from file: ", err)
+				db.logger.Warn("Error reloading database from file: ", err)
 			} else {
-				logger.Info("Database reloaded from file successfully.")
+				db.logger.Info("Database reloaded from file successfully.")
 			}
 		// If the stopWatch channel receives a signal, exit the goroutine.
 		case <-db.stopWatch:
