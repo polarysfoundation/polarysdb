@@ -15,6 +15,10 @@ func BytesToKey(b []byte) Key {
 
 // StringToKey converts a string to a Key.
 func StringToKey(s string) Key {
+	if has0xPrefix(s) {
+		s = s[2:]
+	}
+
 	return BytesToKey([]byte(s))
 }
 
@@ -35,7 +39,7 @@ func (k Key) Bytes() []byte {
 
 // HexToKey converts a hexadecimal string to a Key.
 func HexToKey(s string) Key {
-	if len(s) > 2 && s[:2] == "0x" {
+	if has0xPrefix(s) {
 		s = s[2:]
 	}
 	return StringToKey(s)
