@@ -253,6 +253,19 @@ func (db *Database) ImportEncrypted(key common.Key, path string) error {
 	return db.save()
 }
 
+// ChangeKey changes the encryption key of the database.
+func (db *Database) ChangeKey(oldKey, newKey common.Key) error {
+	db.mutex.Lock()
+	defer db.mutex.Unlock()
+
+	if !common.IsEqual(db.key[:], oldKey[:]) {
+		return fmt.Errorf("old key does not match current database key")
+	}
+
+	db.key = newKey
+	return db.save()
+}
+
 // fileOnChange monitors the database file for external changes and reloads it if a change is detected.
 func (db *Database) fileOnChange() {
 	// Create a new ticker that ticks every 3 seconds.
