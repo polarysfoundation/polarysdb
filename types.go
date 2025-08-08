@@ -277,32 +277,26 @@ func (db *Database) ChangeKey(oldKey, newKey common.Key) error {
 
 // fileOnChange monitors the database file for external changes and reloads it if a change is detected.
 func (db *Database) fileOnChange() {
-	// Create a new ticker that ticks every 3 seconds.
 	ticker := time.NewTicker(3 * time.Second)
-	// Ensure the ticker is stopped when the function exits.
 	defer ticker.Stop()
 
 	for {
 		select {
+		case <-db.stopWatch:
+			return
 		case <-ticker.C:
-			// Get file information for the database path.
 			info, err := os.Stat(db.dbPath)
 			if err != nil {
-				// If the file does not exist, it might be created later.
-				// For other errors, log them but continue, as they might be transient.
 				if !os.IsNotExist(err) {
 					db.logger.Error("error stating database file for changes: ", err)
 				}
 				continue
 			}
 
-			// If the modification time hasn't changed, there's nothing to do.
 			if info.ModTime().Equal(db.lastLoaded) && !db.lastLoaded.IsZero() {
 				continue
 			}
 
-			// The file has changed, reload it.
-			// Acquire a write lock to prevent concurrent access during reload.
 			db.mutex.Lock()
 			err = db.load()
 			db.mutex.Unlock()
@@ -312,9 +306,6 @@ func (db *Database) fileOnChange() {
 			} else {
 				db.logger.Info("Database reloaded from file successfully.")
 			}
-		// If the stopWatch channel receives a signal, exit the goroutine.
-		case <-db.stopWatch:
-			return
 		}
 	}
 }
@@ -367,6 +358,9 @@ func (db *Database) load() error {
 // Close stops the file change watcher goroutine.
 func (db *Database) Close() {
 	if db.stopWatch != nil {
-		close(db.stopWatch)
+		select {
+		case db.stopWatch <- struct{}{}:
+		default:
+		}
 	}
 }
