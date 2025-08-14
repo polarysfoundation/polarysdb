@@ -24,7 +24,7 @@ type Database struct {
 	lastLoaded time.Time
 	logger     *logger.Logger
 
-	// Mejoras para el control del watcher
+	// Context and synchronization primitives for managing the file watcher goroutine.
 	ctx        context.Context
 	cancel     context.CancelFunc
 	watcherWg  sync.WaitGroup
@@ -33,6 +33,10 @@ type Database struct {
 }
 
 // Init initializes the database with the given encryption key and directory path.
+// It sets up the database structure, creates the necessary directories,
+// initializes the logger, loads the initial data from the database file,
+// and starts a goroutine to watch for external file changes.
+// Returns a pointer to the initialized Database and an error if any occurs.
 func Init(keyDb common.Key, dirPath string) (*Database, error) {
 	path := config.GetStateDBPath(dirPath)
 
@@ -51,7 +55,7 @@ func Init(keyDb common.Key, dirPath string) (*Database, error) {
 	}
 	l := logger.NewLogger(logCfg)
 
-	// Crear contexto con cancelación
+	// Create a context with cancellation for graceful shutdown of the watcher.
 	ctx, cancel := context.WithCancel(context.Background())
 
 	db := &Database{
@@ -64,13 +68,16 @@ func Init(keyDb common.Key, dirPath string) (*Database, error) {
 		closed: false,
 	}
 
-	// Load for the first time
+	// Load the database content for the first time.
 	if err := db.load(); err != nil {
-		cancel() // Cancelar contexto si falla la carga inicial
+		// Cancel the context if initial load fails to prevent the watcher from starting.
+		cancel()
 		return nil, err
 	}
 
-	// Start the external change watcher con WaitGroup
+	// Start the external file change watcher in a new goroutine.
+	// The WaitGroup ensures that the main program waits for the watcher
+	// to finish before exiting during database closure.
 	db.watcherWg.Add(1)
 	go db.fileOnChange()
 
@@ -78,6 +85,9 @@ func Init(keyDb common.Key, dirPath string) (*Database, error) {
 }
 
 // Exist checks if a table exists in the database.
+// It acquires a read lock to safely access the database's internal map.
+// Returns true if the table exists, false otherwise, or if the database is closed.
+// This function is thread-safe.
 func (db *Database) Exist(table string) bool {
 	if db.isClosed() {
 		return false
@@ -91,6 +101,10 @@ func (db *Database) Exist(table string) bool {
 }
 
 // Create creates a new table in the database.
+// It acquires a write lock to safely modify the database's internal map.
+// If the table already exists, it does nothing.
+// After creating the table, it saves the changes to the persistent storage.
+// Returns an error if the database is closed or if saving fails. This function is thread-safe.
 func (db *Database) Create(table string) error {
 	if db.isClosed() {
 		return fmt.Errorf("database is closed")
@@ -107,6 +121,10 @@ func (db *Database) Create(table string) error {
 }
 
 // Write updates an existing record in the specified table with the given key and value.
+// It acquires a write lock to safely modify the database's internal map.
+// If the table does not exist, it returns an error.
+// After updating the record, it saves the changes to the persistent storage.
+// Returns an error if the database is closed, the table does not exist, or saving fails. This function is thread-safe.
 func (db *Database) Write(table, key string, value any) error {
 	if db.isClosed() {
 		return fmt.Errorf("database is closed")
@@ -177,6 +195,10 @@ func (db *Database) ReadBatch(table string) ([]any, error) {
 }
 
 // Export saves the current in-memory database to a plain, unencrypted JSON file.
+// It requires the correct encryption key for authorization.
+// The data is marshaled into a human-readable JSON format with indentation.
+// Returns an error if the database is closed, the key is unauthorized,
+// marshaling fails, or writing to the file fails. This function is thread-safe.
 func (db *Database) Export(key common.Key, path string) error {
 	if db.isClosed() {
 		return fmt.Errorf("database is closed")
@@ -198,6 +220,11 @@ func (db *Database) Export(key common.Key, path string) error {
 }
 
 // Import loads data from a plain, unencrypted JSON file into the in-memory database.
+// It requires the correct encryption key for authorization.
+// The data is read from the specified file, unmarshaled from JSON,
+// and replaces the current in-memory database content.
+// Returns an error if the database is closed, the key is unauthorized,
+// reading the file fails, unmarshaling fails, or the imported data is invalid. This function is thread-safe.
 func (db *Database) Import(key common.Key, path string) error {
 	if db.isClosed() {
 		return fmt.Errorf("database is closed")
@@ -234,6 +261,10 @@ func (db *Database) Import(key common.Key, path string) error {
 }
 
 // ExportEncrypted saves the current in-memory database to an encrypted JSON file.
+// It requires the correct encryption key for authorization.
+// The data is marshaled into JSON, then encrypted using the database's internal key.
+// Returns an error if the database is closed, the key is unauthorized,
+// marshaling/encryption fails, or writing to the file fails. This function is thread-safe.
 func (db *Database) ExportEncrypted(key common.Key, path string) error {
 	if db.isClosed() {
 		return fmt.Errorf("database is closed")
@@ -260,6 +291,11 @@ func (db *Database) ExportEncrypted(key common.Key, path string) error {
 }
 
 // ImportEncrypted loads data from an encrypted file into the in-memory database.
+// It requires the correct encryption key for authorization.
+// The data is read from the specified file, decrypted using the database's internal key,
+// unmarshaled from JSON, and replaces the current in-memory database content.
+// Returns an error if the database is closed, the key is unauthorized,
+// reading/decryption fails, unmarshaling fails, or the imported data is invalid. This function is thread-safe.
 func (db *Database) ImportEncrypted(key common.Key, path string) error {
 	if db.isClosed() {
 		return fmt.Errorf("database is closed")
@@ -301,6 +337,10 @@ func (db *Database) ImportEncrypted(key common.Key, path string) error {
 }
 
 // ChangeKey changes the encryption key of the database.
+// It requires the old key for authorization.
+// The database's internal key is updated, and the changes are saved to persistent storage
+// using the new key.
+// Returns an error if the database is closed, the old key does not match, or saving fails. This function is thread-safe.
 func (db *Database) ChangeKey(oldKey, newKey common.Key) error {
 	if db.isClosed() {
 		return fmt.Errorf("database is closed")
@@ -317,7 +357,9 @@ func (db *Database) ChangeKey(oldKey, newKey common.Key) error {
 	return db.save()
 }
 
-// isClosed verifica si la base de datos está cerrada de forma thread-safe
+// isClosed checks if the database is currently marked as closed.
+// It uses a mutex to ensure thread-safe access to the `closed` flag.
+// Returns true if the database is closed, false otherwise.
 func (db *Database) isClosed() bool {
 	db.closeMutex.Lock()
 	defer db.closeMutex.Unlock()
@@ -352,7 +394,7 @@ func (db *Database) fileOnChange() {
 				continue
 			}
 
-			// Si el archivo no ha cambiado, continuar
+			// If the file modification time hasn't changed since the last load, continue.
 			if info.ModTime().Equal(db.lastLoaded) && !db.lastLoaded.IsZero() {
 				continue
 			}
@@ -372,6 +414,9 @@ func (db *Database) fileOnChange() {
 }
 
 // save serializes the database data to JSON, encrypts it, and writes it to the file.
+// It assumes the caller has already acquired the necessary write lock.
+// Returns an error if marshaling fails, encryption fails, or writing to the file fails.
+// This is an internal helper function.
 func (db *Database) save() error {
 	if db.isClosed() {
 		return fmt.Errorf("database is closed")
@@ -391,6 +436,9 @@ func (db *Database) save() error {
 }
 
 // load reads the encrypted database file, decrypts it, and deserializes the JSON data.
+// It assumes the caller has already acquired the necessary lock (read or write).
+// If the file does not exist, it returns nil (indicating an empty database).
+// Returns an error if reading the file fails, decryption fails, or unmarshaling fails. This is an internal helper function.
 func (db *Database) load() error {
 	info, err := os.Stat(db.dbPath)
 	if os.IsNotExist(err) {
@@ -421,16 +469,20 @@ func (db *Database) load() error {
 }
 
 // Close stops the file change watcher goroutine gracefully and waits for it to finish.
+// It marks the database as closed, cancels the context to signal the watcher,
+// and waits for the watcher goroutine to complete with a default timeout of 10 seconds.
+// Returns an error if the watcher does not stop within the timeout.
+// This function is thread-safe and idempotent (calling it multiple times has no additional effect).
 func (db *Database) Close() error {
 	db.closeMutex.Lock()
 	if db.closed {
 		db.closeMutex.Unlock()
-		return nil // Ya está cerrada
+		return nil // Already closed
 	}
 	db.closed = true
 	db.closeMutex.Unlock()
-
-	// Cancelar el contexto para señalar al watcher que debe detenerse
+	
+	// Cancel the context to signal the watcher goroutine to stop.
 	if db.cancel != nil {
 		db.cancel()
 	}
@@ -441,18 +493,26 @@ func (db *Database) Close() error {
 		db.watcherWg.Wait()
 		close(done)
 	}()
-
+	
+	// Wait for the watcher to finish or timeout.
 	select {
 	case <-done:
 		db.logger.Info("Database closed successfully")
 		return nil
 	case <-time.After(10 * time.Second):
+		// If the watcher doesn't stop within the timeout, log a warning
+		// and return an error, but the database is still marked as closed
+		// and the context is cancelled.
 		db.logger.Warn("Timeout waiting for file watcher to stop")
 		return fmt.Errorf("timeout waiting for file watcher to stop")
 	}
 }
 
 // CloseWithTimeout permite especificar un timeout personalizado para el cierre
+// It functions identically to `Close`, but provides flexibility in the waiting period
+// for the file watcher to terminate.
+// Returns an error if the watcher does not stop within the specified timeout.
+// This function is thread-safe and idempotent.
 func (db *Database) CloseWithTimeout(timeout time.Duration) error {
 	db.closeMutex.Lock()
 	if db.closed {
