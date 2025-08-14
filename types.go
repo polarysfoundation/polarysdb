@@ -1,6 +1,7 @@
 package polarysdb
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -15,13 +16,6 @@ import (
 )
 
 // Database represents a simple in-memory database structure.
-// It contains the following fields:
-// - dbPath: a string representing the path to the database.
-// - data: a nested map structure to store the database records.
-// - mutex: a sync.RWMutex to ensure thread-safe access to the database.
-// - key: a common.Key used for database operations.
-// - lastLoaded: a time.Time indicating the last time the database was loaded.
-// - stopWatch: a channel used to signal when the database should stop watching for changes.
 type Database struct {
 	dbPath     string
 	data       map[string]map[string]any
@@ -29,11 +23,16 @@ type Database struct {
 	key        common.Key
 	lastLoaded time.Time
 	logger     *logger.Logger
-	stopWatch  chan struct{}
+
+	// Mejoras para el control del watcher
+	ctx        context.Context
+	cancel     context.CancelFunc
+	watcherWg  sync.WaitGroup
+	closed     bool
+	closeMutex sync.Mutex
 }
 
 // Init initializes the database with the given encryption key and directory path.
-// It creates the necessary directories if they do not exist and loads the database from the file.
 func Init(keyDb common.Key, dirPath string) (*Database, error) {
 	path := config.GetStateDBPath(dirPath)
 
@@ -43,6 +42,7 @@ func Init(keyDb common.Key, dirPath string) (*Database, error) {
 			return nil, err
 		}
 	}
+
 	// Initialize logger
 	logCfg := logger.Config{
 		MinLevel:  logger.LevelInfo,
@@ -51,20 +51,27 @@ func Init(keyDb common.Key, dirPath string) (*Database, error) {
 	}
 	l := logger.NewLogger(logCfg)
 
+	// Crear contexto con cancelación
+	ctx, cancel := context.WithCancel(context.Background())
+
 	db := &Database{
-		dbPath:    path,
-		data:      make(map[string]map[string]any),
-		key:       keyDb,
-		stopWatch: make(chan struct{}),
-		logger:    l,
+		dbPath: path,
+		data:   make(map[string]map[string]any),
+		key:    keyDb,
+		logger: l,
+		ctx:    ctx,
+		cancel: cancel,
+		closed: false,
 	}
 
 	// Load for the first time
 	if err := db.load(); err != nil {
+		cancel() // Cancelar contexto si falla la carga inicial
 		return nil, err
 	}
 
-	// Start the external change watcher
+	// Start the external change watcher con WaitGroup
+	db.watcherWg.Add(1)
 	go db.fileOnChange()
 
 	return db, nil
@@ -72,17 +79,23 @@ func Init(keyDb common.Key, dirPath string) (*Database, error) {
 
 // Exist checks if a table exists in the database.
 func (db *Database) Exist(table string) bool {
+	if db.isClosed() {
+		return false
+	}
+
 	db.mutex.RLock()
 	defer db.mutex.RUnlock()
 
-	if _, ok := db.data[table]; ok {
-		return true
-	}
-	return false
+	_, ok := db.data[table]
+	return ok
 }
 
 // Create creates a new table in the database.
 func (db *Database) Create(table string) error {
+	if db.isClosed() {
+		return fmt.Errorf("database is closed")
+	}
+
 	db.mutex.Lock()
 	defer db.mutex.Unlock()
 
@@ -94,8 +107,11 @@ func (db *Database) Create(table string) error {
 }
 
 // Write updates an existing record in the specified table with the given key and value.
-// Returns an error if the table does not exist.
 func (db *Database) Write(table, key string, value any) error {
+	if db.isClosed() {
+		return fmt.Errorf("database is closed")
+	}
+
 	db.mutex.Lock()
 	defer db.mutex.Unlock()
 
@@ -107,8 +123,11 @@ func (db *Database) Write(table, key string, value any) error {
 }
 
 // Delete removes a record from the specified table with the given key.
-// Returns an error if the table does not exist.
 func (db *Database) Delete(table, key string) error {
+	if db.isClosed() {
+		return fmt.Errorf("database is closed")
+	}
+
 	db.mutex.Lock()
 	defer db.mutex.Unlock()
 
@@ -120,8 +139,11 @@ func (db *Database) Delete(table, key string) error {
 }
 
 // Read retrieves a record from the specified table with the given key.
-// Returns the value and a boolean indicating if the key exists.
 func (db *Database) Read(table, key string) (any, bool) {
+	if db.isClosed() {
+		return nil, false
+	}
+
 	db.mutex.RLock()
 	defer db.mutex.RUnlock()
 
@@ -133,13 +155,15 @@ func (db *Database) Read(table, key string) (any, bool) {
 }
 
 // ReadBatch retrieves all records from the specified table.
-// Returns a slice of values.
 func (db *Database) ReadBatch(table string) ([]any, error) {
+	if db.isClosed() {
+		return nil, fmt.Errorf("database is closed")
+	}
+
 	db.mutex.RLock()
 	defer db.mutex.RUnlock()
 
 	v := make([]any, 0)
-
 	t, ok := db.data[table]
 	if !ok {
 		return nil, fmt.Errorf("table %s does not exist", table)
@@ -154,6 +178,10 @@ func (db *Database) ReadBatch(table string) ([]any, error) {
 
 // Export saves the current in-memory database to a plain, unencrypted JSON file.
 func (db *Database) Export(key common.Key, path string) error {
+	if db.isClosed() {
+		return fmt.Errorf("database is closed")
+	}
+
 	db.mutex.RLock()
 	defer db.mutex.RUnlock()
 
@@ -169,16 +197,19 @@ func (db *Database) Export(key common.Key, path string) error {
 	return os.WriteFile(path, data, 0600)
 }
 
-// Import loads data from a plain, unencrypted JSON file into the in-memory database,
-// replacing its current content, and then saves the encrypted database to disk.
+// Import loads data from a plain, unencrypted JSON file into the in-memory database.
 func (db *Database) Import(key common.Key, path string) error {
+	if db.isClosed() {
+		return fmt.Errorf("database is closed")
+	}
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return err
 	}
 
 	if !common.IsEqual(key[:], db.key[:]) {
-		return fmt.Errorf("unauthorized access to export database")
+		return fmt.Errorf("unauthorized access to import database")
 	}
 
 	var importedData map[string]map[string]any
@@ -204,6 +235,10 @@ func (db *Database) Import(key common.Key, path string) error {
 
 // ExportEncrypted saves the current in-memory database to an encrypted JSON file.
 func (db *Database) ExportEncrypted(key common.Key, path string) error {
+	if db.isClosed() {
+		return fmt.Errorf("database is closed")
+	}
+
 	db.mutex.RLock()
 	defer db.mutex.RUnlock()
 
@@ -224,16 +259,19 @@ func (db *Database) ExportEncrypted(key common.Key, path string) error {
 	return os.WriteFile(path, encryptedData, 0600)
 }
 
-// ImportEncrypted loads data from an encrypted file into the in-memory database,
-// replacing its current content, and then saves the encrypted database to disk.
+// ImportEncrypted loads data from an encrypted file into the in-memory database.
 func (db *Database) ImportEncrypted(key common.Key, path string) error {
+	if db.isClosed() {
+		return fmt.Errorf("database is closed")
+	}
+
 	encryptedData, err := os.ReadFile(path)
 	if err != nil {
 		return err
 	}
 
 	if !common.IsEqual(key[:], db.key[:]) {
-		return fmt.Errorf("unauthorized access to export database")
+		return fmt.Errorf("unauthorized access to import database")
 	}
 
 	decryptedData, err := crypto.Decrypt(encryptedData, db.key)
@@ -264,6 +302,10 @@ func (db *Database) ImportEncrypted(key common.Key, path string) error {
 
 // ChangeKey changes the encryption key of the database.
 func (db *Database) ChangeKey(oldKey, newKey common.Key) error {
+	if db.isClosed() {
+		return fmt.Errorf("database is closed")
+	}
+
 	db.mutex.Lock()
 	defer db.mutex.Unlock()
 
@@ -275,16 +317,33 @@ func (db *Database) ChangeKey(oldKey, newKey common.Key) error {
 	return db.save()
 }
 
-// fileOnChange monitors the database file for external changes and reloads it if a change is detected.
+// isClosed verifica si la base de datos está cerrada de forma thread-safe
+func (db *Database) isClosed() bool {
+	db.closeMutex.Lock()
+	defer db.closeMutex.Unlock()
+	return db.closed
+}
+
+// fileOnChange monitors the database file for external changes with proper cancellation.
 func (db *Database) fileOnChange() {
+	defer db.watcherWg.Done()
+
 	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
 
+	db.logger.Info("File watcher started")
+
 	for {
 		select {
-		case <-db.stopWatch:
+		case <-db.ctx.Done():
+			db.logger.Info("File watcher stopped")
 			return
 		case <-ticker.C:
+			if db.isClosed() {
+				db.logger.Info("Database closed, stopping file watcher")
+				return
+			}
+
 			info, err := os.Stat(db.dbPath)
 			if err != nil {
 				if !os.IsNotExist(err) {
@@ -293,10 +352,12 @@ func (db *Database) fileOnChange() {
 				continue
 			}
 
+			// Si el archivo no ha cambiado, continuar
 			if info.ModTime().Equal(db.lastLoaded) && !db.lastLoaded.IsZero() {
 				continue
 			}
 
+			// Intentar cargar los cambios
 			db.mutex.Lock()
 			err = db.load()
 			db.mutex.Unlock()
@@ -312,6 +373,10 @@ func (db *Database) fileOnChange() {
 
 // save serializes the database data to JSON, encrypts it, and writes it to the file.
 func (db *Database) save() error {
+	if db.isClosed() {
+		return fmt.Errorf("database is closed")
+	}
+
 	data, err := json.Marshal(db.data)
 	if err != nil {
 		return err
@@ -325,7 +390,7 @@ func (db *Database) save() error {
 	return os.WriteFile(db.dbPath, encryptedData, 0600)
 }
 
-// load reads the encrypted database file, decrypts it, and deserializes the JSON data into the database.
+// load reads the encrypted database file, decrypts it, and deserializes the JSON data.
 func (db *Database) load() error {
 	info, err := os.Stat(db.dbPath)
 	if os.IsNotExist(err) {
@@ -355,10 +420,64 @@ func (db *Database) load() error {
 	return nil
 }
 
-// Close stops the file change watcher goroutine.
-func (db *Database) Close() {
-	if db.stopWatch != nil {
-		close(db.stopWatch)
-		db.stopWatch = nil
+// Close stops the file change watcher goroutine gracefully and waits for it to finish.
+func (db *Database) Close() error {
+	db.closeMutex.Lock()
+	if db.closed {
+		db.closeMutex.Unlock()
+		return nil // Ya está cerrada
+	}
+	db.closed = true
+	db.closeMutex.Unlock()
+
+	// Cancelar el contexto para señalar al watcher que debe detenerse
+	if db.cancel != nil {
+		db.cancel()
+	}
+
+	// Esperar con timeout a que termine el watcher
+	done := make(chan struct{})
+	go func() {
+		db.watcherWg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		db.logger.Info("Database closed successfully")
+		return nil
+	case <-time.After(10 * time.Second):
+		db.logger.Warn("Timeout waiting for file watcher to stop")
+		return fmt.Errorf("timeout waiting for file watcher to stop")
+	}
+}
+
+// CloseWithTimeout permite especificar un timeout personalizado para el cierre
+func (db *Database) CloseWithTimeout(timeout time.Duration) error {
+	db.closeMutex.Lock()
+	if db.closed {
+		db.closeMutex.Unlock()
+		return nil
+	}
+	db.closed = true
+	db.closeMutex.Unlock()
+
+	if db.cancel != nil {
+		db.cancel()
+	}
+
+	done := make(chan struct{})
+	go func() {
+		db.watcherWg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		db.logger.Info("Database closed successfully")
+		return nil
+	case <-time.After(timeout):
+		db.logger.Warn("Timeout waiting for file watcher to stop")
+		return fmt.Errorf("timeout waiting for file watcher to stop")
 	}
 }
