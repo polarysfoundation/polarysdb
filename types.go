@@ -358,9 +358,7 @@ func (db *Database) load() error {
 // Close stops the file change watcher goroutine.
 func (db *Database) Close() {
 	if db.stopWatch != nil {
-		select {
-		case db.stopWatch <- struct{}{}:
-		default:
-		}
+		close(db.stopWatch)
+		db.stopWatch = nil
 	}
 }
