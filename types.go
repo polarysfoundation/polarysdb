@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -13,6 +14,7 @@ import (
 	"github.com/polarysfoundation/polarysdb/modules/config"
 	"github.com/polarysfoundation/polarysdb/modules/crypto"
 	"github.com/polarysfoundation/polarysdb/modules/logger"
+	"golang.org/x/sys/unix"
 )
 
 // Database represents a simple in-memory database structure.
@@ -432,7 +434,29 @@ func (db *Database) save() error {
 		return err
 	}
 
-	return os.WriteFile(db.dbPath, encryptedData, 0600)
+	// Crear archivo temporal
+	tmp := db.dbPath + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	// Lock exclusivo mientras escribimos
+	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX); err != nil {
+		return err
+	}
+	defer unix.Flock(int(f.Fd()), unix.LOCK_UN)
+
+	if _, err := f.Write(encryptedData); err != nil {
+		return err
+	}
+	if err := f.Sync(); err != nil { // asegurar flush a disco
+		return err
+	}
+
+	// Rename atómico → reemplaza el archivo original
+	return os.Rename(tmp, db.dbPath)
 }
 
 // load reads the encrypted database file, decrypts it, and deserializes the JSON data.
@@ -448,7 +472,19 @@ func (db *Database) load() error {
 		return err
 	}
 
-	encryptedData, err := os.ReadFile(db.dbPath)
+	f, err := os.Open(db.dbPath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	// Lock compartido (permite múltiples lectores, pero bloquea si hay escritor)
+	if err := unix.Flock(int(f.Fd()), unix.LOCK_SH); err != nil {
+		return err
+	}
+	defer unix.Flock(int(f.Fd()), unix.LOCK_UN)
+
+	encryptedData, err := io.ReadAll(f)
 	if err != nil {
 		return err
 	}
@@ -481,7 +517,7 @@ func (db *Database) Close() error {
 	}
 	db.closed = true
 	db.closeMutex.Unlock()
-	
+
 	// Cancel the context to signal the watcher goroutine to stop.
 	if db.cancel != nil {
 		db.cancel()
@@ -493,7 +529,7 @@ func (db *Database) Close() error {
 		db.watcherWg.Wait()
 		close(done)
 	}()
-	
+
 	// Wait for the watcher to finish or timeout.
 	select {
 	case <-done:

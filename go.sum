@@ -1,2 +1,4 @@
 github.com/polarysfoundation/pm-256 v0.0.0-20250112065549-cb7b6eb92c94 h1:03/yJyAO/dHAF79VUjoCiFJgiVI7wCZ2jq2qD7mctM0=
 github.com/polarysfoundation/pm-256 v0.0.0-20250112065549-cb7b6eb92c94/go.mod h1:9/TxgrEcbGlDpNNoKLc5eWGNEI3pRRkPf8y6ZFV/7bg=
+golang.org/x/sys v0.35.0 h1:vz1N37gP5bs89s7He8XuIYXpyY0+QlsKmzipCbUtyxI=
+golang.org/x/sys v0.35.0/go.mod h1:BJP2sWEmIv4KK5OTEluFJCKSidICx8ciO85XgH3Ak8k=
