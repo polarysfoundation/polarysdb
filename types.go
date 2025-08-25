@@ -32,6 +32,7 @@ type Database struct {
 	watcherWg  sync.WaitGroup
 	closed     bool
 	closeMutex sync.Mutex
+	debug      bool
 }
 
 // Init initializes the database with the given encryption key and directory path.
@@ -39,7 +40,7 @@ type Database struct {
 // initializes the logger, loads the initial data from the database file,
 // and starts a goroutine to watch for external file changes.
 // Returns a pointer to the initialized Database and an error if any occurs.
-func Init(keyDb common.Key, dirPath string) (*Database, error) {
+func Init(keyDb common.Key, dirPath string, debug bool) (*Database, error) {
 	path := config.GetStateDBPath(dirPath)
 
 	dir := filepath.Dir(path)
@@ -68,6 +69,7 @@ func Init(keyDb common.Key, dirPath string) (*Database, error) {
 		ctx:    ctx,
 		cancel: cancel,
 		closed: false,
+		debug:  debug,
 	}
 
 	// Load the database content for the first time.
@@ -139,6 +141,11 @@ func (db *Database) Write(table, key string, value any) error {
 		return fmt.Errorf("table %s does not exist", table)
 	}
 	db.data[table][key] = value
+
+	if db.debug {
+		db.logger.Infof("Write: table=%s key=%s value=%+v", table, key, value)
+	}
+
 	return db.save()
 }
 
@@ -375,12 +382,9 @@ func (db *Database) fileOnChange() {
 	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
 
-	db.logger.Info("File watcher started")
-
 	for {
 		select {
 		case <-db.ctx.Done():
-			db.logger.Info("File watcher stopped")
 			return
 		case <-ticker.C:
 			if db.isClosed() {

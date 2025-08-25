@@ -91,6 +91,38 @@ func (l *Logger) Info(v ...interface{}) {
 	l.infoLogger.Println(v...)
 }
 
+// Infof logs an informational message with formatting.
+func (l *Logger) Infof(format string, v ...interface{}) {
+	if l.minLevel > LevelInfo {
+		return
+	}
+	l.infoLogger.Printf(format, v...)
+}
+
+// Warnf logs a warning message with formatting.
+func (l *Logger) Warnf(format string, v ...interface{}) {
+	if l.minLevel > LevelWarn {
+		return
+	}
+	l.warnLogger.Printf(format, v...)
+}
+
+// Errorf logs an error message with formatting.
+func (l *Logger) Errorf(format string, v ...interface{}) {
+	if l.minLevel > LevelError {
+		return
+	}
+	l.errorLogger.Printf(format, v...)
+}
+
+// Fatalf logs a fatal error with formatting and exits.
+func (l *Logger) Fatalf(format string, v ...interface{}) {
+	if l.minLevel > LevelFatal {
+		return
+	}
+	l.fatalLogger.Fatalf(format, v...)
+}
+
 // Warn logs a warning message.
 func (l *Logger) Warn(v ...interface{}) {
 	if l.minLevel > LevelWarn {
