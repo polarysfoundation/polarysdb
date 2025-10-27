@@ -1,0 +1,24 @@
+bin/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test and benchmark outputs
+*.test
+*.out
+*.prof
+
+# Data directories
+data/
+data_*/
+backups/
+backups_*/
+logs/
+bench_*/
+stress_*/
+
+# IDE
+.vscode/
+.idea/
+*.swp
