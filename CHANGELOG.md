@@ -46,22 +46,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [v1.0.2] — 2025-09-xx
+## [v1.0.2] — 2025-10-27
 
 ### Added
 
-* Initial implementation of PolarysDB core engine.
+* Implementation of listening devices for simultaneous changes.
+* Correction in the handling of simultaneous goroutines. 
 * JSON-based Write-Ahead Log (WAL).
-* Basic persistence layer, encryption, and recovery system.
-* Documentation and initial performance tests.
+* Import and export of encrypted and unencrypted data.
+* Changes and rotation of private keys.
 
 ---
 
-## [v1.0.0] — 2025-08-xx
+## [v1.0.1] — 2025-06-28
 
 ### Added
 
-* First public release of PolarysDB.
-* Core database structure, logging, and key-value store foundation.
+* First implementation for managing simultaneous changes.
+* Separation for data encryption and decryption into separate functions.
+
+---
+
+## [v1.0.0] — 2025-03-24
+
+### Added
+
+* Refactoring the use of Create and Exist functions.
+* The (common.Key) parameter has been passed directly for better data handling.
+* Changed the use of sync.Mutex to sync.RWMutex
+
+---
+
+## [v0.1-beta] — 2025-01-28
+
+### Added
+
+* Initial release of the in-memory database with AES encryption support.
+* Added support for creating, reading, updating, and deleting records.
+* Implemented batch read functionality.
+* Database data is encrypted and saved to a file.
+* Added thread-safe access to the database using sync.Mutex.
 
 ---
