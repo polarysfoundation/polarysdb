@@ -1,0 +1,43 @@
+syntax = "proto3";
+
+package proto;
+
+option go_package = "github.com/polarysfoundation/polarysdb/modules/wal/proto";
+
+// WALEntry representa una entrada en el Write-Ahead Log
+message WALEntry {
+  // Tipo de operación: 1=CREATE, 2=WRITE, 3=DELETE, 4=COMMIT
+  uint32 op_type = 1;
+  
+  // Nombre de la tabla
+  string table = 2;
+  
+  // Clave del registro
+  string key = 3;
+  
+  // Valor serializado (puede estar vacío para DELETE)
+  bytes value = 4;
+  
+  // ID de la transacción (opcional)
+  string tx_id = 5;
+  
+  // Timestamp en nanosegundos desde Unix epoch
+  int64 timestamp = 6;
+  
+  // Metadatos adicionales (opcional)
+  map<string, string> metadata = 7;
+}
+
+// WALBatch para optimizar escrituras en lote
+message WALBatch {
+  repeated WALEntry entries = 1;
+  int64 batch_timestamp = 2;
+  uint32 batch_id = 3;
+}
+
+// WALCheckpoint para marcar puntos de recuperación
+message WALCheckpoint {
+  int64 timestamp = 1;
+  uint64 sequence_number = 2;
+  string snapshot_path = 3;
+}
