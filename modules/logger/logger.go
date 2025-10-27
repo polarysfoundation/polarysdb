@@ -14,6 +14,7 @@ const (
 	LevelWarn
 	LevelError
 	LevelFatal
+	LevelDebug
 )
 
 type Logger struct {
@@ -22,6 +23,7 @@ type Logger struct {
 	warnLogger  *log.Logger
 	errorLogger *log.Logger
 	fatalLogger *log.Logger
+	debugLogger *log.Logger
 	file        *os.File
 	minLevel    Level
 	toConsole   bool
@@ -64,6 +66,7 @@ func NewLogger(cfg Config) *Logger {
 		l.warnLogger = log.New(infoOut, "\033[33mWARN:\033[0m ", log.Ldate|log.Ltime)
 		l.errorLogger = log.New(errorOut, "\033[31mERROR:\033[0m ", log.Ldate|log.Ltime)
 		l.fatalLogger = log.New(errorOut, "\033[35mFATAL:\033[0m ", log.Ldate|log.Ltime)
+		l.debugLogger = log.New(infoOut, "\033[36mDEBUG:\033[0m ", log.Ldate|log.Ltime)
 	})
 
 	return l
