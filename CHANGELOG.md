@@ -1,54 +1,67 @@
-# 📦 PolarysDB – Changelog
+---
 
-## v1.0.2 (Stable)
+# 📜 Changelog
 
-**Release Date:** *27, October 2025*
+All notable changes to this project will be documented in this file.
 
-**Repository:** [polarysfoundation/polarysdb](https://github.com/polarysfoundation/polarysdb)
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-### 🚀 Features
+## [v1.1.0] — 2025-10-27
 
-* Added **database export utility** to produce human-readable (non-encrypted) dumps, simplifying audits and data migration.
-* Introduced **read-only mode** for database opening, enabling safe data inspection and analytics without modification risks.
+### 🚀 Added
+
+* Binary Write-Ahead Log (WAL) implementation using **Protocol Buffers** for faster and more reliable persistence.
+* **Group commit mechanism** for batching concurrent writes and improving disk I/O performance.
+* **Real-time metrics module** exposing operational statistics such as read/write counts and average latency.
+* **Automatic backup rotation system**, supporting plaintext and encrypted backups.
+* **Hash-based indexing** for O(1) lookup operations on indexed keys.
+* **Transactional layer** providing `BeginTransaction`, `Commit`, and `Rollback` with snapshot isolation.
+* **Centralized configuration system** (`Config` struct) for tuning WAL, compression, and performance.
+* **Comprehensive benchmark suite** with automated performance testing.
+* **Makefile commands** for building, testing, linting, and generating protobuf files (`make build`, `make test`, `make proto`).
+
+### 🧰 Changed
+
+* Reworked the **write subsystem** to support asynchronous buffered writes.
+* Enhanced **AES-256 encryption** with secure key rotation and file-lock protection.
+* Improved **WAL recovery mechanism** to automatically replay incomplete transactions on startup.
+* Simplified public API — single-line database initialization and modular imports.
+* Refined documentation with advanced usage examples (transactions, backups, metrics).
+
+### 🐞 Fixed
+
+* Fixed concurrency issue in batched writes causing skipped or duplicated records under heavy load.
+* Corrected WAL replay logic for interrupted transactions.
+* Fixed synchronization race condition in backup rotation.
+* Resolved counter overflow issue in metrics during long-running benchmarks.
+
+### ⚙️ Migration
+
+* Fully **backward compatible** with all `v1.0.x` versions.
+* WAL files from `v1.0.x` are automatically migrated to the new Protocol Buffers format.
+* No manual data migration required.
 
 ---
 
-### 🧰 Improvements
+## [v1.0.2] — 2025-09-xx
 
-* Refactored database initialization logic for better clarity, safety, and lifecycle management.
-* Enhanced error handling for encrypted import/export (`ExportEncrypted`, `ImportEncrypted`) to provide more descriptive error messages and prevent silent failures.
-* Improved key rotation (`ChangeKey`) mechanism with validation of the previous key and consistency checks across re-encrypted records.
+### Added
 
----
-
-### 🐞 Bug Fixes
-
-* Fixed an issue in `ReadBatch` where some records could be skipped under specific concurrent access conditions.
-* Resolved a `Write` bug causing accidental overwrites when writing to a non-existent table.
-* Added strict validation to `BytesToKey` conversion to prevent data truncation with oversized inputs.
+* Initial implementation of PolarysDB core engine.
+* JSON-based Write-Ahead Log (WAL).
+* Basic persistence layer, encryption, and recovery system.
+* Documentation and initial performance tests.
 
 ---
 
-### ⚙️ Migration Notes
+## [v1.0.0] — 2025-08-xx
 
-* **Backward compatible** with all 1.0.x versions.
-* If using `ChangeKey`, **ensure a full backup** before rotating keys, as the process re-encrypts all stored data.
-* Users relying on concurrent `ReadBatch` operations are advised to review previous query integrity after upgrading.
+### Added
 
----
-
-### 📚 Documentation & Tests
-
-* Updated `README.md` with examples for read-only mode and encrypted import/export usage.
-* Extended unit test coverage for encryption, export/import, and key-rotation workflows.
-
----
-
-### 🔖 Summary
-
-PolarysDB v1.0.2 focuses on **stability, security, and auditability**.
-It strengthens cryptographic workflows, introduces safer access modes, and improves data reliability for production environments.
+* First public release of PolarysDB.
+* Core database structure, logging, and key-value store foundation.
 
 ---
