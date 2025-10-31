@@ -14,18 +14,18 @@ import (
 	"time"
 
 	"github.com/polarysfoundation/polarysdb/modules/backup"
-	"github.com/polarysfoundation/polarysdb/modules/index"
-	"github.com/polarysfoundation/polarysdb/modules/metrics"
 	"github.com/polarysfoundation/polarysdb/modules/common"
 	"github.com/polarysfoundation/polarysdb/modules/config"
+	"github.com/polarysfoundation/polarysdb/modules/index"
 	"github.com/polarysfoundation/polarysdb/modules/logger"
+	"github.com/polarysfoundation/polarysdb/modules/metrics"
 	"github.com/polarysfoundation/polarysdb/modules/storage"
 	"github.com/polarysfoundation/polarysdb/modules/tx"
 	"github.com/polarysfoundation/polarysdb/modules/wal"
 )
 
 const (
-	maxBatchSize         = 100000
+	maxBatchSize = 100000
 )
 
 // WriteOperation representa una operación de escritura pendiente
