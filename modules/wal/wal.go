@@ -473,22 +473,39 @@ func (w *WAL) Close() error {
 	w.closed = true
 	w.closeMutex.Unlock()
 
-	// Cerrar canal
+	w.logger.Info("Closing WAL...")
+
+	// 1. Cerrar canal (detiene nuevas entradas)
 	close(w.buffer)
 
-	// Esperar workers
-	w.wg.Wait()
+	// 2. Esperar workers con timeout corto
+	done := make(chan struct{})
+	go func() {
+		w.wg.Wait()
+		close(done)
+	}()
 
-	// Flush final
+	// Timeout de 5 segundos para workers
+	select {
+	case <-done:
+		// Workers terminaron
+	case <-time.After(5 * time.Second):
+		w.logger.Warn("WAL workers did not finish in time, forcing close")
+	}
+
+	// 3. Flush final sin importar qué
 	if w.writer != nil {
+		w.flushBatch() // Flush batch pendiente
 		w.writer.Flush()
 	}
+
+	// 4. Sync final
 	if w.file != nil {
 		w.file.Sync()
 		w.file.Close()
 	}
 
-	w.logger.Info("WAL closed successfully")
+	w.logger.Info("WAL closed")
 	return nil
 }
 

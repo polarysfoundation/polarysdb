@@ -976,30 +976,49 @@ func (db *Database) Close() error {
 	return db.CloseWithTimeout(30 * time.Second)
 }
 
+// CloseWithTimeout cierra la base de datos con timeout mejorado
 func (db *Database) CloseWithTimeout(timeout time.Duration) error {
 	if !db.closed.CompareAndSwap(false, true) {
-		return nil
+		return nil // Already closed
 	}
 
 	db.logger.Info("Initiating database shutdown...")
 
+	// 1. Cerrar el buffer de escritura PRIMERO (detiene nuevas operaciones)
 	close(db.writeBuffer)
+
+	// 2. Esperar un poco para que se procesen operaciones pendientes
+	time.Sleep(100 * time.Millisecond)
+
+	// 3. Cancelar contexto (señal a todos los workers)
 	if db.cancel != nil {
 		db.cancel()
 	}
 
+	// 4. Cerrar WAL buffer si existe
+	if db.config.EnableWAL && db.wal != nil {
+		// NO cerrar el buffer aquí, dejar que WAL lo maneje
+	}
+
+	// 5. Esperar workers con timeout
 	done := make(chan struct{})
 	go func() {
 		db.wg.Wait()
 
+		// 6. Flush final de datos
 		if db.dirtyFlag.Load() {
+			db.logger.Info("Flushing pending data to disk...")
 			if err := db.flushToDisk(); err != nil {
-				db.logger.Error("Failed to save on close: ", err)
+				db.logger.Error("Failed to flush on close: ", err)
 			}
 		}
 
+		// 7. Cerrar WAL
 		if db.wal != nil {
-			db.wal.Close()
+			db.logger.Info("Closing WAL...")
+			if err := db.wal.Close(); err != nil {
+				db.logger.Error("WAL close error: ", err)
+			}
 		}
 
 		close(done)
@@ -1011,6 +1030,13 @@ func (db *Database) CloseWithTimeout(timeout time.Duration) error {
 		return nil
 	case <-time.After(timeout):
 		db.logger.Warn("Timeout waiting for database to close")
+
+		// Forzar flush incluso con timeout
+		if db.dirtyFlag.Load() {
+			db.logger.Info("Force flushing data...")
+			db.flushToDisk()
+		}
+
 		return fmt.Errorf("timeout waiting for database to close")
 	}
 }
