@@ -620,12 +620,11 @@ func (db *Database) CommitTransaction(txn *tx.Transaction) error {
 }
 
 // Background workers
-
 func (db *Database) processWriteBuffer() {
 	defer db.wg.Done()
 
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
+	batchTicker := time.NewTicker(100 * time.Millisecond)
+	defer batchTicker.Stop()
 
 	pendingOps := make([]*WriteOperation, 0, 100)
 
