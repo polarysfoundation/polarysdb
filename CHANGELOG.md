@@ -9,6 +9,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.1.2] - 2025-10-30
+
+### Fixed
+- Fixed timeout during graceful shutdown (reduced from 30s to <2s)
+- Improved worker goroutine cancellation in Close()
+- Fixed WAL workers not stopping properly
+- Added proper channel closing sequence
+- Reduced shutdown timeout from 30s to 8s
+
+### Changed
+- Optimized shutdown sequence: HTTP first, then DB
+- Added intermediate sleep to allow pending operations to complete
+- Improved error messages during shutdown
+- WAL now has separate 5s timeout for workers
+
+### Performance
+- Shutdown time reduced from 30s to ~1-2s
+- No more hanging goroutines
+- Proper cleanup of all resources
+
+---
+
+## [1.1.1] - 2025-10-30
+
+### Fixed
+- Fixed nil pointer dereference panic during graceful shutdown
+- Added nil checks in writeBuffer processing
+- Improved channel close handling in processWriteBuffer
+- Added timeout buffer before closing database connections
+
+### Changed
+- Increased robustness of shutdown sequence
+- Better error recovery during database close
+
+---
+
 ## [v1.1.0] — 2025-10-27
 
 ### 🚀 Added
