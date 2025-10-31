@@ -635,6 +635,16 @@ func (db *Database) processWriteBuffer() {
 
 		db.dataMutex.Lock()
 		for _, op := range pendingOps {
+			// ✅ FIX: Verificar que op no sea nil
+			if op == nil {
+				continue
+			}
+
+			// ✅ FIX: Verificar que ResultCh no sea nil
+			if op.ResultCh == nil {
+				continue
+			}
+
 			var err error
 			switch op.OpType {
 			case "create":
@@ -687,7 +697,13 @@ func (db *Database) processWriteBuffer() {
 			if err != nil && db.metrics != nil {
 				db.metrics.IncrementFailedOps()
 			}
-			op.ResultCh <- err
+
+			// ✅ FIX: Enviar error solo si el canal no está cerrado
+			select {
+			case op.ResultCh <- err:
+			default:
+				// Canal cerrado o lleno, ignorar
+			}
 		}
 		db.dirtyFlag.Store(true)
 		db.dataMutex.Unlock()
@@ -700,12 +716,20 @@ func (db *Database) processWriteBuffer() {
 		case <-db.ctx.Done():
 			processBatch()
 			return
-		case op := <-db.writeBuffer:
-			pendingOps = append(pendingOps, op)
-			if len(pendingOps) >= 50 {
+		case op, ok := <-db.writeBuffer:
+			// ✅ FIX: Verificar que el canal no esté cerrado
+			if !ok {
 				processBatch()
+				return
 			}
-		case <-ticker.C:
+			// ✅ FIX: Verificar que op no sea nil
+			if op != nil {
+				pendingOps = append(pendingOps, op)
+				if len(pendingOps) >= 50 {
+					processBatch()
+				}
+			}
+		case <-batchTicker.C:
 			processBatch()
 		}
 	}
