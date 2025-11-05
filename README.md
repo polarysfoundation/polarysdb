@@ -1,6 +1,6 @@
 # 🗄️ PolarysDB
 
-[![Version](https://img.shields.io/badge/version-1.1.0-blue.svg)](https://github.com/polarysfoundation/polarysdb/releases)
+[![Version](https://img.shields.io/badge/version-1.1.2-blue.svg)](https://github.com/polarysfoundation/polarysdb/releases)
 [![Go Version](https://img.shields.io/badge/Go-1.21+-00ADD8?style=flat&logo=go)](https://golang.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Protocol Buffers](https://img.shields.io/badge/Protocol_Buffers-3.0-4285F4?style=flat)](https://protobuf.dev/)
