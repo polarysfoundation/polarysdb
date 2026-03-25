@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.1.3] - 2026-03-24
+
+### Added
+- Added formal Security Policy (`SECURITY.md`)
+- Linked Security Policy in `README.md` for vulnerability reporting
+
+### Changed
+- Updated dependency `github.com/polarysfoundation/pm-256` to `v1.1.0`
+
+---
+
 ## [1.1.2] - 2025-10-30
 
 ### Fixed
