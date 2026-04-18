@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.1.4] - 2026-04-17
+
+### Added
+- Index maintenance on write and delete paths so secondary indexes stay consistent with data changes.
+- Helpers for extracting and normalizing indexed field values across operations.
+
+### Changed
+- Index manager refactored for clearer handling of multiple value types.
+- Index creation logging updated to surface unique-value behavior more accurately.
+
+---
+
 ## [1.1.3] - 2026-03-24
 
 ### Added
