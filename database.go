@@ -660,7 +660,17 @@ func (db *Database) processWriteBuffer() {
 
 			case "write":
 				if t, ok := db.data[op.Table]; ok {
+					oldVal := t[op.Key]
 					t[op.Key] = op.Value
+
+					// Update indexes
+					if db.indexMgr != nil {
+						fields := db.indexMgr.GetIndexedFields(op.Table)
+						for _, field := range fields {
+							db.indexMgr.UpdateIndex(op.Table, field, op.Key, oldVal, op.Value)
+						}
+					}
+
 					if db.metrics != nil {
 						db.metrics.IncrementWrites(1)
 					}
@@ -678,7 +688,17 @@ func (db *Database) processWriteBuffer() {
 
 			case "delete":
 				if t, ok := db.data[op.Table]; ok {
+					oldVal := t[op.Key]
 					delete(t, op.Key)
+
+					// Update indexes
+					if db.indexMgr != nil {
+						fields := db.indexMgr.GetIndexedFields(op.Table)
+						for _, field := range fields {
+							db.indexMgr.DeleteFromIndex(op.Table, field, op.Key, oldVal)
+						}
+					}
+
 					if db.metrics != nil {
 						db.metrics.IncrementDeletes()
 					}
