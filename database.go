@@ -6,6 +6,7 @@ package polarysdb
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -71,6 +72,8 @@ type Database struct {
 	lastSave   time.Time
 
 	pendingOps atomic.Int64
+
+	version atomic.Int64
 }
 
 // Config configuración de la base de datos
@@ -456,6 +459,7 @@ func (db *Database) WriteBatch(table string, records map[string]any) error {
 		}
 	}
 
+	db.version.Add(1)
 	db.dirtyFlag.Store(true)
 	if db.metrics != nil {
 		db.metrics.IncrementWrites(uint64(len(records)))
@@ -547,10 +551,11 @@ func (db *Database) CreateIndex(table, field string) error {
 
 	db.dataMutex.RLock()
 	tableData := db.data[table]
+	db.dataMutex.RUnlock()
+
 	if err := db.indexMgr.CreateIndex(table, field, tableData); err != nil {
 		return err
 	}
-	db.dataMutex.RUnlock()
 
 	return nil
 }
@@ -581,28 +586,29 @@ func (db *Database) QueryByIndex(table, field string, value any) ([]any, error) 
 }
 
 // Transaction operations
-
 func (db *Database) BeginTransaction() (*tx.Transaction, error) {
 	if !db.config.EnableTransactions || db.txManager == nil {
 		return nil, fmt.Errorf("transactions are disabled")
 	}
 
 	db.dataMutex.RLock()
-	snapshot := db.createSnapshot()
+	snapshot, version := db.createSnapshot()
 	db.dataMutex.RUnlock()
 
-	return db.txManager.Begin(snapshot), nil
+	txn := db.txManager.Begin(snapshot)
+	txn.SetSnapshotVersion(version)
+	return txn, nil
 }
 
-func (db *Database) createSnapshot() map[string]map[string]any {
-	snapshot := make(map[string]map[string]any)
+func (db *Database) createSnapshot() (map[string]map[string]any, int64) {
+	snapshot := make(map[string]map[string]any, len(db.data))
 	for table, records := range db.data {
-		snapshot[table] = make(map[string]any)
+		snapshot[table] = make(map[string]any, len(records))
 		for key, value := range records {
-			snapshot[table][key] = value
+			snapshot[table][key] = deepCopyValue(value) // ← DEEP COPY
 		}
 	}
-	return snapshot
+	return snapshot, db.version.Load() // ← capturar version
 }
 
 func (db *Database) CommitTransaction(txn *tx.Transaction) error {
@@ -618,6 +624,16 @@ func (db *Database) CommitTransaction(txn *tx.Transaction) error {
 	db.dataMutex.Lock()
 	defer db.dataMutex.Unlock()
 
+	snapshotVersion := txn.SnapshotVersion()
+	currentVersion := db.version.Load()
+	if currentVersion != snapshotVersion {
+		return fmt.Errorf(
+			"transaction conflict: data modified since snapshot (expected v%d, current v%d). Retry the transaction",
+			snapshotVersion, currentVersion,
+		)
+	}
+
+	// Aplicar cambios (sin cambios)
 	for table, records := range changes {
 		if _, ok := db.data[table]; !ok {
 			db.data[table] = make(map[string]any)
@@ -631,6 +647,7 @@ func (db *Database) CommitTransaction(txn *tx.Transaction) error {
 		}
 	}
 
+	db.version.Add(1)
 	db.dirtyFlag.Store(true)
 	return nil
 }
@@ -739,6 +756,7 @@ func (db *Database) processWriteBuffer() {
 				// Canal cerrado o lleno, ignorar
 			}
 		}
+		db.version.Add(1)
 		db.dirtyFlag.Store(true)
 		db.dataMutex.Unlock()
 
@@ -756,7 +774,6 @@ func (db *Database) processWriteBuffer() {
 				return
 			}
 			if op != nil {
-				db.pendingOps.Add(-1)
 				pendingOps = append(pendingOps, op)
 				if len(pendingOps) >= 50 {
 					processBatch()
@@ -1071,5 +1088,48 @@ func (db *Database) CloseWithTimeout(timeout time.Duration) error {
 		}
 
 		return fmt.Errorf("timeout waiting for database to close")
+	}
+}
+
+// deepCopyValue realiza una copia profunda recursiva de cualquier valor.
+// Los tipos primitivos (bool, int, string, etc.) se copian por valor naturalmente.
+// Los tipos referencia (maps, slices) se copian recursivamente.
+// Tipos desconocidos se delegan a JSON round-trip como fallback.
+func deepCopyValue(v any) any {
+	if v == nil {
+		return nil
+	}
+
+	switch val := v.(type) {
+	case bool, int, int8, int16, int32, int64,
+		uint, uint8, uint16, uint32, uint64,
+		float32, float64, string:
+		return val
+	case []byte:
+		cp := make([]byte, len(val))
+		copy(cp, val)
+		return cp
+	case map[string]any:
+		cp := make(map[string]any, len(val))
+		for k, child := range val {
+			cp[k] = deepCopyValue(child)
+		}
+		return cp
+	case []any:
+		cp := make([]any, len(val))
+		for i, child := range val {
+			cp[i] = deepCopyValue(child)
+		}
+		return cp
+	default:
+		data, err := json.Marshal(val)
+		if err != nil {
+			return val
+		}
+		var result any
+		if err := json.Unmarshal(data, &result); err != nil {
+			return val
+		}
+		return result
 	}
 }

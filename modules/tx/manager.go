@@ -10,13 +10,14 @@ import (
 )
 
 type Transaction struct {
-	ID        string
-	Snapshot  map[string]map[string]any
-	Changes   map[string]map[string]any
-	Committed bool
-	Aborted   bool
-	CreatedAt time.Time
-	mutex     sync.Mutex
+	ID              string
+	Snapshot        map[string]map[string]any
+	Changes         map[string]map[string]any
+	Committed       bool
+	Aborted         bool
+	CreatedAt       time.Time
+	snapshotVersion int64
+	mutex           sync.Mutex
 }
 
 type Manager struct {
@@ -112,6 +113,14 @@ func (tx *Transaction) Delete(table, key string) error {
 	tx.Changes[table][key] = nil
 
 	return nil
+}
+
+func (t *Transaction) SnapshotVersion() int64 {
+	return t.snapshotVersion
+}
+
+func (t *Transaction) SetSnapshotVersion(v int64) {
+	t.snapshotVersion = v
 }
 
 func (m *Manager) GetStats() map[string]any {
