@@ -8,6 +8,10 @@ import (
 	"github.com/polarysfoundation/polarysdb/modules/gonum"
 )
 
+var (
+	byteSliceType = reflect.TypeFor[[]byte]()
+)
+
 func ToStruct(src any, dst any) error {
 	if src == nil {
 		return errors.New("ToStruct: source is nil")
@@ -81,42 +85,55 @@ func MapToStruct(m map[string]any, output any) error {
 		switch fieldValue.Kind() {
 
 		case reflect.String:
-			if s, ok := raw.(string); ok {
-				fieldValue.SetString(s)
-			}
+			convertString(fieldValue, raw)
 
 		case reflect.Bool:
-			if b, ok := raw.(bool); ok {
-				fieldValue.SetBool(b)
-			}
+			convertBool(fieldValue, raw)
 
-		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		case reflect.Int,
+			reflect.Int8,
+			reflect.Int16,
+			reflect.Int32,
+			reflect.Int64:
+
 			convertInt(fieldValue, raw)
 
-		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		case reflect.Uint,
+			reflect.Uint8,
+			reflect.Uint16,
+			reflect.Uint32,
+			reflect.Uint64:
+
 			convertUint(fieldValue, raw)
 
-		case reflect.Float32, reflect.Float64:
+		case reflect.Float32,
+			reflect.Float64:
+
 			convertFloat(fieldValue, raw)
 
 		case reflect.Struct:
-			// Substruct → map
+
 			if subMap, ok := raw.(map[string]any); ok {
 				MapToStruct(subMap, fieldValue.Addr().Interface())
 			}
 
 		case reflect.Pointer:
+
 			if fieldValue.Type() == reflect.TypeFor[*gonum.Number]() {
+
 				if num := parseGonumNumber(raw); num != nil {
 					fieldValue.Set(reflect.ValueOf(num))
 				}
+
 				continue
 			}
 
-			// apuntador a struct
 			if fieldValue.Type().Elem().Kind() == reflect.Struct {
+
 				if subMap, ok := raw.(map[string]any); ok {
+
 					newStruct := reflect.New(fieldValue.Type().Elem())
+
 					if err := MapToStruct(subMap, newStruct.Interface()); err == nil {
 						fieldValue.Set(newStruct)
 					}
@@ -124,14 +141,24 @@ func MapToStruct(m map[string]any, output any) error {
 			}
 
 		case reflect.Slice:
+
+			// Caso especial: []byte
+			if fieldValue.Type() == byteSliceType {
+				convertBytes(fieldValue, raw)
+				continue
+			}
+
 			convertSliceStructSafe(fieldValue, raw)
+
+		case reflect.Array:
+
+			convertArray(fieldValue, raw)
 		}
 	}
 
 	return nil
 }
 
-// ✅ Maneja slices seguros, evitando nil
 func convertSliceStructSafe(fieldValue reflect.Value, raw any) {
 	rawSlice, ok := raw.([]any)
 	if !ok {
@@ -179,31 +206,231 @@ func convertSliceStructSafe(fieldValue reflect.Value, raw any) {
 	fieldValue.Set(newSlice)
 }
 
+func convertString(fieldValue reflect.Value, raw any) {
+	if s, ok := raw.(string); ok {
+		fieldValue.SetString(s)
+	}
+}
+
+func convertBool(fieldValue reflect.Value, raw any) {
+
+	if b, ok := raw.(bool); ok {
+		fieldValue.SetBool(b)
+	}
+}
+
 // Conversores numéricos
 func convertInt(fieldValue reflect.Value, raw any) {
+
 	switch v := raw.(type) {
+
 	case int:
 		fieldValue.SetInt(int64(v))
+
+	case int8:
+		fieldValue.SetInt(int64(v))
+
+	case int16:
+		fieldValue.SetInt(int64(v))
+
+	case int32:
+		fieldValue.SetInt(int64(v))
+
 	case int64:
 		fieldValue.SetInt(v)
+
+	case uint:
+		fieldValue.SetInt(int64(v))
+
+	case uint8:
+		fieldValue.SetInt(int64(v))
+
+	case uint16:
+		fieldValue.SetInt(int64(v))
+
+	case uint32:
+		fieldValue.SetInt(int64(v))
+
+	case uint64:
+		fieldValue.SetInt(int64(v))
+
+	case float32:
+		fieldValue.SetInt(int64(v))
+
 	case float64:
 		fieldValue.SetInt(int64(v))
 	}
 }
 
 func convertUint(fieldValue reflect.Value, raw any) {
+
 	switch v := raw.(type) {
+
+	case uint:
+		fieldValue.SetUint(uint64(v))
+
+	case uint8:
+		fieldValue.SetUint(uint64(v))
+
+	case uint16:
+		fieldValue.SetUint(uint64(v))
+
+	case uint32:
+		fieldValue.SetUint(uint64(v))
+
 	case uint64:
 		fieldValue.SetUint(v)
+
+	case int:
+		fieldValue.SetUint(uint64(v))
+
+	case int8:
+		fieldValue.SetUint(uint64(v))
+
+	case int16:
+		fieldValue.SetUint(uint64(v))
+
+	case int32:
+		fieldValue.SetUint(uint64(v))
+
+	case int64:
+		fieldValue.SetUint(uint64(v))
+
+	case float32:
+		fieldValue.SetUint(uint64(v))
+
 	case float64:
 		fieldValue.SetUint(uint64(v))
 	}
 }
 
 func convertFloat(fieldValue reflect.Value, raw any) {
-	if f, ok := raw.(float64); ok {
-		fieldValue.SetFloat(f)
+
+	switch v := raw.(type) {
+
+	case float32:
+		fieldValue.SetFloat(float64(v))
+
+	case float64:
+		fieldValue.SetFloat(v)
+
+	case int:
+		fieldValue.SetFloat(float64(v))
+
+	case int8:
+		fieldValue.SetFloat(float64(v))
+
+	case int16:
+		fieldValue.SetFloat(float64(v))
+
+	case int32:
+		fieldValue.SetFloat(float64(v))
+
+	case int64:
+		fieldValue.SetFloat(float64(v))
+
+	case uint:
+		fieldValue.SetFloat(float64(v))
+
+	case uint8:
+		fieldValue.SetFloat(float64(v))
+
+	case uint16:
+		fieldValue.SetFloat(float64(v))
+
+	case uint32:
+		fieldValue.SetFloat(float64(v))
+
+	case uint64:
+		fieldValue.SetFloat(float64(v))
 	}
+}
+
+func convertBytes(fieldValue reflect.Value, raw any) {
+
+	switch v := raw.(type) {
+
+	case []uint8:
+		fieldValue.SetBytes(v)
+
+	case string:
+		fieldValue.SetBytes([]byte(v))
+
+	case []any:
+		out := make([]byte, len(v))
+
+		for i, e := range v {
+
+			switch n := e.(type) {
+
+			case uint8:
+				out[i] = n
+
+			case int:
+				out[i] = byte(n)
+
+			case float64:
+				out[i] = byte(n)
+
+			default:
+				return
+			}
+		}
+
+		fieldValue.SetBytes(out)
+	}
+}
+
+func convertArray(fieldValue reflect.Value, raw any) {
+
+	if fieldValue.Type().Elem().Kind() != reflect.Uint8 {
+		return
+	}
+
+	var src []byte
+
+	switch v := raw.(type) {
+
+	case []byte:
+		src = v
+
+	case string:
+		src = []byte(v)
+
+	case []any:
+
+		src = make([]byte, len(v))
+
+		for i, e := range v {
+
+			switch n := e.(type) {
+
+			case uint8:
+				src[i] = n
+
+			case int:
+				src[i] = byte(n)
+
+			case int64:
+				src[i] = byte(n)
+
+			case float64:
+				src[i] = byte(n)
+
+			default:
+				return
+			}
+		}
+
+	default:
+		return
+	}
+
+	if len(src) != fieldValue.Len() {
+		return
+	}
+
+	reflect.Copy(fieldValue.Slice(0, fieldValue.Len()), reflect.ValueOf(src))
 }
 
 func parseGonumNumber(raw any) *gonum.Number {
