@@ -357,7 +357,11 @@ func (db *Database) applyWALEntry(entry *wal.Entry) error {
 		}
 	case wal.OpWrite:
 		if _, ok := db.data[entry.Table]; !ok {
-			return fmt.Errorf("table %s does not exist", entry.Table)
+			db.logger.Warnf(
+				"WAL recovery: table %q auto-created during OpWrite (missing OpCreate entry)",
+				entry.Table,
+			)
+			db.data[entry.Table] = make(map[string]any)
 		}
 		db.data[entry.Table][entry.Key] = entry.Value
 	case wal.OpDelete:
@@ -365,6 +369,7 @@ func (db *Database) applyWALEntry(entry *wal.Entry) error {
 			delete(t, entry.Key)
 		}
 	}
+
 	return nil
 }
 
