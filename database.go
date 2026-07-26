@@ -540,7 +540,6 @@ func (db *Database) ReadBatch(table string) ([]any, error) {
 }
 
 // Index operations
-
 func (db *Database) CreateIndex(table, field string) error {
 	if !db.config.EnableIndexes || db.indexMgr == nil {
 		return fmt.Errorf("indexes are disabled")
@@ -548,9 +547,12 @@ func (db *Database) CreateIndex(table, field string) error {
 
 	db.dataMutex.RLock()
 	tableData := db.data[table]
+	if err := db.indexMgr.CreateIndex(table, field, tableData); err != nil {
+		return err
+	}
 	db.dataMutex.RUnlock()
 
-	return db.indexMgr.CreateIndex(table, field, tableData)
+	return nil
 }
 
 func (db *Database) QueryByIndex(table, field string, value any) ([]any, error) {
