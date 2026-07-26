@@ -2,6 +2,7 @@ package wal
 
 import (
 	"bufio"
+	"context"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -67,6 +68,9 @@ type WAL struct {
 	closed     bool
 	closeMutex sync.Mutex
 	wg         sync.WaitGroup
+
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 // New crea una nueva instancia de WAL
@@ -108,6 +112,10 @@ func New(cfg *Config, log *logger.Logger) (*WAL, error) {
 
 // Start inicia los workers del WAL
 func (w *WAL) Start() {
+	if w.ctx == nil {
+		w.logger.Warn("WAL context not set, using background context")
+		w.ctx = context.Background()
+	}
 	w.wg.Add(2)
 	go w.batchWriter()
 	go w.periodicSync()
@@ -406,10 +414,22 @@ func (w *WAL) rotate() error {
 	w.logger.Infof("WAL rotated successfully. Old file: %s", backupPath)
 
 	// Eliminar backup antiguo después de un tiempo
+	w.wg.Add(1) // Registrar en WaitGroup
 	go func() {
-		time.Sleep(30 * time.Second)
-		if err := os.Remove(backupPath); err != nil {
-			w.logger.Warnf("Failed to remove old WAL backup: %v", err)
+		defer w.wg.Done()
+		timer := time.NewTimer(30 * time.Second)
+		defer timer.Stop()
+
+		select {
+		case <-timer.C:
+			// Eliminar backup después del tiempo
+			if err := os.Remove(backupPath); err != nil {
+				w.logger.Warnf("Failed to remove old WAL backup: %v", err)
+			}
+		case <-w.ctx.Done():
+			// Cancelación solicitada, no eliminar (o eliminar si se desea)
+			w.logger.Info("Rotation cleanup cancelled, not removing backup")
+			return
 		}
 	}()
 
@@ -484,22 +504,24 @@ func (w *WAL) Close() error {
 	w.closed = true
 	w.closeMutex.Unlock()
 
-	w.logger.Info("Closing WAL...")
+	// Cancelar contexto para detener workers de limpieza
+	if w.cancel != nil {
+		w.cancel()
+	}
 
-	// 1. Cerrar canal (detiene nuevas entradas)
+	w.logger.Info("Closing WAL...")
 	close(w.buffer)
 
-	// 2. Esperar workers con timeout corto
+	// Esperar a que todos los workers terminen (con timeout)
 	done := make(chan struct{})
 	go func() {
 		w.wg.Wait()
 		close(done)
 	}()
 
-	// Timeout de 5 segundos para workers
 	select {
 	case <-done:
-		// Workers terminaron
+		// OK
 	case <-time.After(5 * time.Second):
 		w.logger.Warn("WAL workers did not finish in time, forcing close")
 	}
@@ -518,6 +540,10 @@ func (w *WAL) Close() error {
 
 	w.logger.Info("WAL closed")
 	return nil
+}
+
+func (w *WAL) SetContext(ctx context.Context) {
+	w.ctx, w.cancel = context.WithCancel(ctx)
 }
 
 // ============================================================================

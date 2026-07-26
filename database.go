@@ -196,11 +196,14 @@ func InitWithConfig(cfg *Config) (*Database, error) {
 			SyncInterval: cfg.WALSyncInterval,
 			MaxSize:      100 * 1024 * 1024, // 100MB
 		}
+
 		db.wal, err = wal.New(walCfg, l)
 		if err != nil {
 			cancel()
 			return nil, fmt.Errorf("failed to initialize WAL: %w", err)
 		}
+		db.wal.SetContext(ctx)
+		db.wal.Start()
 
 		// Recuperar desde WAL
 		if err := db.recoverFromWAL(); err != nil {
