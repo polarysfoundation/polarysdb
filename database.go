@@ -29,12 +29,19 @@ const (
 	maxBatchSize = 100000
 )
 
-// WriteOperation representa una operación de escritura pendiente
+const (
+	OpCreate = "create"
+	OpWrite  = "write"
+	OpDelete = "delete"
+	OpBatch  = "batch"
+)
+
 type WriteOperation struct {
 	OpType    string
 	Table     string
 	Key       string
 	Value     any
+	Records   map[string]any
 	ResultCh  chan error
 	Timestamp time.Time
 }
@@ -440,32 +447,25 @@ func (db *Database) WriteBatch(table string, records map[string]any) error {
 		return fmt.Errorf("batch size exceeds maximum")
 	}
 
-	db.dataMutex.Lock()
-	defer db.dataMutex.Unlock()
-
-	if _, ok := db.data[table]; !ok {
-		return fmt.Errorf("table %s does not exist", table)
+	op := &WriteOperation{
+		OpType:    OpBatch,
+		Table:     table,
+		Records:   records,
+		ResultCh:  make(chan error, 1),
+		Timestamp: time.Now(),
 	}
+	db.pendingOps.Add(1)
 
-	for key, value := range records {
-		db.data[table][key] = value
-		if db.wal != nil {
-			db.wal.Append(&wal.Entry{
-				OpType: wal.OpWrite,
-				Table:  table,
-				Key:    key,
-				Value:  value,
-			})
-		}
+	select {
+	case db.writeBuffer <- op:
+		return <-op.ResultCh
+	case <-db.ctx.Done():
+		db.pendingOps.Add(-1)
+		return fmt.Errorf("database is shutting down")
+	case <-time.After(30 * time.Second): // Timeout más largo para batches
+		db.pendingOps.Add(-1)
+		return fmt.Errorf("batch operation timeout")
 	}
-
-	db.version.Add(1)
-	db.dirtyFlag.Store(true)
-	if db.metrics != nil {
-		db.metrics.IncrementWrites(uint64(len(records)))
-	}
-
-	return nil
 }
 
 func (db *Database) Delete(table, key string) error {
@@ -678,7 +678,7 @@ func (db *Database) processWriteBuffer() {
 
 			var err error
 			switch op.OpType {
-			case "create":
+			case OpCreate:
 				if _, ok := db.data[op.Table]; !ok {
 					db.data[op.Table] = make(map[string]any)
 				}
@@ -689,7 +689,7 @@ func (db *Database) processWriteBuffer() {
 					})
 				}
 
-			case "write":
+			case OpWrite:
 				if t, ok := db.data[op.Table]; ok {
 					oldVal := t[op.Key]
 					t[op.Key] = op.Value
@@ -717,7 +717,7 @@ func (db *Database) processWriteBuffer() {
 					err = fmt.Errorf("table %s does not exist", op.Table)
 				}
 
-			case "delete":
+			case OpDelete:
 				if t, ok := db.data[op.Table]; ok {
 					oldVal := t[op.Key]
 					delete(t, op.Key)
@@ -743,6 +743,42 @@ func (db *Database) processWriteBuffer() {
 				} else {
 					err = fmt.Errorf("table %s does not exist", op.Table)
 				}
+			case OpBatch:
+				t, ok := db.data[op.Table]
+				if !ok {
+					err = fmt.Errorf("table %s does not exist", op.Table)
+					break
+				}
+
+				for key, value := range op.Records {
+					oldVal := t[key]
+					t[key] = value
+
+					// Actualizar índices
+					if db.indexMgr != nil {
+						fields := db.indexMgr.GetIndexedFields(op.Table)
+						for _, field := range fields {
+							db.indexMgr.UpdateIndex(op.Table, field, key, oldVal, value)
+						}
+					}
+
+					// Append al WAL
+					if db.wal != nil {
+						db.wal.Append(&wal.Entry{
+							OpType: wal.OpWrite,
+							Table:  op.Table,
+							Key:    key,
+							Value:  value,
+						})
+					}
+				}
+
+				if db.metrics != nil {
+					db.metrics.IncrementWrites(uint64(len(op.Records)))
+				}
+			default:
+				err = fmt.Errorf("unknown operation type: %s", op.OpType)
+
 			}
 
 			if err != nil && db.metrics != nil {

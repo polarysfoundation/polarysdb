@@ -22,6 +22,7 @@ const (
 	OpWrite  uint8 = 2
 	OpDelete uint8 = 3
 	OpCommit uint8 = 4
+	OpBatch  uint8 = 5
 
 	maxEntrySize = 10 * 1024 * 1024 // 10MB max per entry
 	headerSize   = 8                // 4 bytes length + 4 bytes checksum

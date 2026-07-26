@@ -49,8 +49,6 @@ func (e *Engine) Save(data map[string]map[string]any) error {
 		return fmt.Errorf("marshal error: %w", err)
 	}
 
-	// TODO: Aplicar compresión si está habilitada
-	
 	encryptedData, err := crypto.Encrypt(jsonData, e.key)
 	if err != nil {
 		return fmt.Errorf("encryption error: %w", err)

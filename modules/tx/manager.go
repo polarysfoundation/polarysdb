@@ -22,7 +22,7 @@ type Transaction struct {
 
 type Manager struct {
 	transactions sync.Map
-	counter      uint64
+	counter      atomic.Uint64
 	logger       *logger.Logger
 	activeTxs    atomic.Int32
 	committedTxs atomic.Uint64
@@ -36,7 +36,7 @@ func NewManager(log *logger.Logger) *Manager {
 }
 
 func (m *Manager) Begin(snapshot map[string]map[string]any) *Transaction {
-	id := fmt.Sprintf("tx_%d_%d", time.Now().UnixNano(), atomic.AddUint64(&m.counter, 1))
+	id := fmt.Sprintf("tx_%d_%d", time.Now().UnixNano(), m.counter.Add(1))
 
 	tx := &Transaction{
 		ID:        id,
