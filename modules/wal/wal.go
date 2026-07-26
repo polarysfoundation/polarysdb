@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"context"
 	"encoding/binary"
-	"encoding/json"
 	"fmt"
 	"hash/crc32"
 	"io"
@@ -12,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/polarysfoundation/polarysdb/modules/encoding"
 	"github.com/polarysfoundation/polarysdb/modules/logger"
 	pb "github.com/polarysfoundation/polarysdb/modules/wal/proto"
 	"google.golang.org/protobuf/proto"
@@ -222,7 +222,7 @@ func (w *WAL) writeEntry(entry *Entry) error {
 
 	// Serializar valor si existe
 	if entry.Value != nil {
-		valueBytes, err := serializeValue(entry.Value)
+		valueBytes, err := encoding.SerializeValue(entry.Value)
 		if err != nil {
 			return fmt.Errorf("failed to serialize value: %w", err)
 		}
@@ -364,7 +364,7 @@ func readEntry(reader *bufio.Reader) (*Entry, error) {
 
 	// Deserializar valor si existe
 	if len(pbEntry.Value) > 0 {
-		value, err := deserializeValue(pbEntry.Value)
+		value, err := encoding.DeserializeValue(pbEntry.Value)
 		if err != nil {
 			return nil, fmt.Errorf("failed to deserialize value: %w", err)
 		}
@@ -544,50 +544,4 @@ func (w *WAL) Close() error {
 
 func (w *WAL) SetContext(ctx context.Context) {
 	w.ctx, w.cancel = context.WithCancel(ctx)
-}
-
-// ============================================================================
-// Helper functions para serialización de valores
-// ============================================================================
-
-// serializeValue convierte un valor Go a bytes
-func serializeValue(value any) ([]byte, error) {
-	switch v := value.(type) {
-	case []byte:
-		return v, nil
-	case string:
-		return []byte(v), nil
-	case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
-		return []byte(fmt.Sprintf("%v", v)), nil
-	case float32, float64:
-		return []byte(fmt.Sprintf("%v", v)), nil
-	case bool:
-		if v {
-			return []byte("true"), nil
-		}
-		return []byte("false"), nil
-	default:
-		// Para tipos complejos (maps, structs), usar JSON
-		data, err := json.Marshal(v)
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal complex value: %w", err)
-		}
-		return data, nil
-	}
-}
-
-// deserializeValue convierte bytes de vuelta a un valor Go
-func deserializeValue(data []byte) (any, error) {
-	if len(data) == 0 {
-		return nil, nil
-	}
-
-	// Intentar deserializar como JSON primero (para tipos complejos)
-	var jsonValue any
-	if err := json.Unmarshal(data, &jsonValue); err == nil {
-		return jsonValue, nil
-	}
-
-	// Si falla, retornar como string
-	return string(data), nil
 }
