@@ -69,6 +69,8 @@ type Database struct {
 	dirtyFlag  atomic.Bool
 	lastLoaded time.Time
 	lastSave   time.Time
+
+	pendingOps atomic.Int64
 }
 
 // Config configuración de la base de datos
@@ -376,13 +378,16 @@ func (db *Database) Create(table string) error {
 		ResultCh:  make(chan error, 1),
 		Timestamp: time.Now(),
 	}
+	db.pendingOps.Add(1)
 
 	select {
 	case db.writeBuffer <- op:
 		return <-op.ResultCh
 	case <-db.ctx.Done():
+		db.pendingOps.Add(-1)
 		return fmt.Errorf("database is shutting down")
 	case <-time.After(5 * time.Second):
+		db.pendingOps.Add(-1)
 		return fmt.Errorf("operation timeout")
 	}
 }
@@ -407,13 +412,16 @@ func (db *Database) Write(table, key string, value any) error {
 		ResultCh:  make(chan error, 1),
 		Timestamp: time.Now(),
 	}
+	db.pendingOps.Add(1)
 
 	select {
 	case db.writeBuffer <- op:
 		return <-op.ResultCh
 	case <-db.ctx.Done():
+		db.pendingOps.Add(-1)
 		return fmt.Errorf("database is shutting down")
 	case <-time.After(5 * time.Second):
+		db.pendingOps.Add(-1)
 		return fmt.Errorf("operation timeout")
 	}
 }
@@ -465,13 +473,16 @@ func (db *Database) Delete(table, key string) error {
 		ResultCh:  make(chan error, 1),
 		Timestamp: time.Now(),
 	}
+	db.pendingOps.Add(1)
 
 	select {
 	case db.writeBuffer <- op:
 		return <-op.ResultCh
 	case <-db.ctx.Done():
+		db.pendingOps.Add(-1)
 		return fmt.Errorf("database is shutting down")
 	case <-time.After(5 * time.Second):
+		db.pendingOps.Add(-1)
 		return fmt.Errorf("operation timeout")
 	}
 }
@@ -635,12 +646,10 @@ func (db *Database) processWriteBuffer() {
 
 		db.dataMutex.Lock()
 		for _, op := range pendingOps {
-			// ✅ FIX: Verificar que op no sea nil
 			if op == nil {
 				continue
 			}
 
-			// ✅ FIX: Verificar que ResultCh no sea nil
 			if op.ResultCh == nil {
 				continue
 			}
@@ -717,8 +726,8 @@ func (db *Database) processWriteBuffer() {
 			if err != nil && db.metrics != nil {
 				db.metrics.IncrementFailedOps()
 			}
+			db.pendingOps.Add(-1)
 
-			// ✅ FIX: Enviar error solo si el canal no está cerrado
 			select {
 			case op.ResultCh <- err:
 			default:
@@ -737,13 +746,12 @@ func (db *Database) processWriteBuffer() {
 			processBatch()
 			return
 		case op, ok := <-db.writeBuffer:
-			// ✅ FIX: Verificar que el canal no esté cerrado
 			if !ok {
 				processBatch()
 				return
 			}
-			// ✅ FIX: Verificar que op no sea nil
 			if op != nil {
+				db.pendingOps.Add(-1)
 				pendingOps = append(pendingOps, op)
 				if len(pendingOps) >= 50 {
 					processBatch()
@@ -805,7 +813,7 @@ func (db *Database) fileOnChange() {
 				continue
 			}
 
-			if !db.dirtyFlag.Load() && len(db.writeBuffer) == 0 {
+			if !db.dirtyFlag.Load() && db.pendingOps.Load() == 0 {
 				db.dataMutex.Lock()
 				err = db.load()
 				db.dataMutex.Unlock()
@@ -1015,9 +1023,9 @@ func (db *Database) CloseWithTimeout(timeout time.Duration) error {
 		db.cancel()
 	}
 
-	// 4. Cerrar WAL buffer si existe
+	// 4. Cerrar WAL buffer ANTES de cerrar writeBuffer para que wal.Append no bloquee
 	if db.config.EnableWAL && db.wal != nil {
-		// NO cerrar el buffer aquí, dejar que WAL lo maneje
+		db.wal.CloseBuffer()
 	}
 
 	// 5. Esperar workers con timeout

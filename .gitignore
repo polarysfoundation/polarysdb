@@ -22,3 +22,5 @@ stress_*/
 .vscode/
 .idea/
 *.swp
+.DS_Store
+AUDIT.md

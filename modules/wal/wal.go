@@ -463,6 +463,17 @@ func (w *WAL) GetStats() map[string]any {
 	}
 }
 
+// CloseBuffer cierra solo el canal de buffer para que Append falle rápido
+func (w *WAL) CloseBuffer() {
+	w.closeMutex.Lock()
+	if w.closed || w.buffer == nil {
+		w.closeMutex.Unlock()
+		return
+	}
+	close(w.buffer)
+	w.closeMutex.Unlock()
+}
+
 // Close cierra el WAL de forma segura
 func (w *WAL) Close() error {
 	w.closeMutex.Lock()
