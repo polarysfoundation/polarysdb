@@ -27,7 +27,7 @@ type Engine struct {
 	compression bool
 	maxRetries  int
 	retryDelay  time.Duration
-	mutex       sync.Mutex
+	mutex       sync.RWMutex
 }
 
 func New(cfg *Config) (*Engine, error) {
@@ -81,8 +81,8 @@ func (e *Engine) atomicWrite(data []byte) error {
 }
 
 func (e *Engine) Load() (map[string]map[string]any, time.Time, error) {
-	e.mutex.Lock()
-	defer e.mutex.Unlock()
+	e.mutex.RLock()
+	defer e.mutex.RUnlock()
 
 	info, err := os.Stat(e.path)
 	if os.IsNotExist(err) {
@@ -121,14 +121,6 @@ func (e *Engine) Load() (map[string]map[string]any, time.Time, error) {
 	return data, info.ModTime(), nil
 }
 
-func (e *Engine) Serialize(data map[string]map[string]any) ([]byte, error) {
-	jsonData, err := json.Marshal(data)
-	if err != nil {
-		return nil, err
-	}
-	return crypto.Encrypt(jsonData, e.key)
-}
-
 func (e *Engine) ExportPlain(data map[string]map[string]any, path string) error {
 	jsonData, err := json.MarshalIndent(data, "", "  ")
 	if err != nil {
@@ -147,36 +139,59 @@ func (e *Engine) ImportPlain(path string) (map[string]map[string]any, error) {
 	return result, err
 }
 
+func (e *Engine) Serialize(data map[string]map[string]any) ([]byte, error) {
+    key := e.getKey()
+
+    jsonData, err := json.Marshal(data)
+    if err != nil {
+        return nil, err
+    }
+    return crypto.Encrypt(jsonData, key)
+}
+
 func (e *Engine) ExportEncrypted(data map[string]map[string]any, path string) error {
-	jsonData, err := json.MarshalIndent(data, "", "  ")
-	if err != nil {
-		return err
-	}
-	encryptedData, err := crypto.Encrypt(jsonData, e.key)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, encryptedData, 0600)
+    key := e.getKey()
+
+    jsonData, err := json.MarshalIndent(data, "", "  ")
+    if err != nil {
+        return err
+    }
+    encryptedData, err := crypto.Encrypt(jsonData, key)
+    if err != nil {
+        return err
+    }
+    return os.WriteFile(path, encryptedData, 0600)
 }
 
 func (e *Engine) ImportEncrypted(path string) (map[string]map[string]any, error) {
-	encryptedData, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	decryptedData, err := crypto.Decrypt(encryptedData, e.key)
-	if err != nil {
-		return nil, err
-	}
-	var result map[string]map[string]any
-	err = json.Unmarshal(decryptedData, &result)
-	return result, err
+    key := e.getKey()
+
+    encryptedData, err := os.ReadFile(path)
+    if err != nil {
+        return nil, err
+    }
+    decryptedData, err := crypto.Decrypt(encryptedData, key)
+    if err != nil {
+        return nil, err
+    }
+    var result map[string]map[string]any
+    err = json.Unmarshal(decryptedData, &result)
+    return result, err
 }
 
 func (e *Engine) UpdateKey(newKey common.Key) {
 	e.mutex.Lock()
 	defer e.mutex.Unlock()
 	e.key = newKey
+}
+
+// getKey retorna una copia segura de la key de encriptación.
+// Los arrays en Go ([N]byte) son value types, así que el return
+// es una copia independiente — no hay referencia compartida.
+func (e *Engine) getKey() common.Key {
+	e.mutex.Lock()
+	defer e.mutex.Unlock()
+	return e.key
 }
 
 func (e *Engine) GetPath() string {
