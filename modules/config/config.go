@@ -24,6 +24,10 @@ func getHomeSubDir(subdir string, dir string) string {
 	return subDirPath
 }
 
+func GetHomeSubDir(subdir string, dir string) string {
+	return getHomeSubDir(subdir, dir)
+}
+
 // GetStateDBPath returns the path to the state database file.
 // It takes the parent directory name as an argument and constructs the path
 // by calling getHomeSubDir to create the necessary subdirectory structure.

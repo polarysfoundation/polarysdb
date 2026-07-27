@@ -70,6 +70,8 @@ type WAL struct {
 	closeMutex sync.Mutex
 	wg         sync.WaitGroup
 
+	bufferClosed bool
+
 	ctx    context.Context
 	cancel context.CancelFunc
 }
@@ -151,6 +153,7 @@ func (w *WAL) batchWriter() {
 	defer ticker.Stop()
 
 	for {
+		// Prioridad: drain buffer primero
 		select {
 		case entry, ok := <-w.buffer:
 			if !ok {
@@ -167,8 +170,25 @@ func (w *WAL) batchWriter() {
 				w.flushBatch()
 			}
 
-		case <-ticker.C:
-			w.flushBatch()
+		default:
+			// Buffer vacío — verificar contexto
+			select {
+			case <-w.ctx.Done():
+				w.flushBatch()
+				return
+			case entry, ok := <-w.buffer:
+				if !ok {
+					w.flushBatch()
+					return
+				}
+
+				w.batchMutex.Lock()
+				w.pendingBatch = append(w.pendingBatch, entry)
+				w.batchMutex.Unlock()
+
+			case <-ticker.C:
+				w.flushBatch()
+			}
 		}
 	}
 }
@@ -272,22 +292,30 @@ func (w *WAL) periodicSync() {
 	defer w.wg.Done()
 
 	if w.config.GroupCommit {
-		return // Group commit ya hace sync
+		return
 	}
 
 	ticker := time.NewTicker(w.config.SyncInterval)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		w.closeMutex.Lock()
-		if w.closed {
+	for {
+		select {
+		case <-ticker.C:
+			w.closeMutex.Lock()
+			if w.closed {
+				w.closeMutex.Unlock()
+				return
+			}
 			w.closeMutex.Unlock()
-			return
-		}
-		w.closeMutex.Unlock()
 
-		if err := w.file.Sync(); err != nil {
-			w.logger.Errorf("WAL sync failed: %v", err)
+			if err := w.file.Sync(); err != nil {
+				w.logger.Errorf("WAL sync failed: %v", err)
+			}
+
+		case <-w.ctx.Done():
+			// Flush final antes de salir
+			w.file.Sync()
+			return
 		}
 	}
 }
@@ -487,11 +515,12 @@ func (w *WAL) GetStats() map[string]any {
 // CloseBuffer cierra solo el canal de buffer para que Append falle rápido
 func (w *WAL) CloseBuffer() {
 	w.closeMutex.Lock()
-	if w.closed || w.buffer == nil {
+	if w.bufferClosed || w.buffer == nil {
 		w.closeMutex.Unlock()
 		return
 	}
 	close(w.buffer)
+	w.bufferClosed = true // ← NUEVO
 	w.closeMutex.Unlock()
 }
 
@@ -503,17 +532,22 @@ func (w *WAL) Close() error {
 		return nil
 	}
 	w.closed = true
+
+	// Solo cerrar el buffer si no se cerró antes
+	if !w.bufferClosed {
+		close(w.buffer)
+		w.bufferClosed = true
+	}
 	w.closeMutex.Unlock()
 
-	// Cancelar contexto para detener workers de limpieza
+	// Cancelar contexto para detener workers de limpieza (rotate)
 	if w.cancel != nil {
 		w.cancel()
 	}
 
 	w.logger.Info("Closing WAL...")
-	close(w.buffer)
 
-	// Esperar a que todos los workers terminen (con timeout)
+	// Esperar a que batchWriter y periodicSync terminen
 	done := make(chan struct{})
 	go func() {
 		w.wg.Wait()
@@ -522,18 +556,16 @@ func (w *WAL) Close() error {
 
 	select {
 	case <-done:
-		// OK
 	case <-time.After(5 * time.Second):
-		w.logger.Warn("WAL workers did not finish in time, forcing close")
+		w.logger.Warn("WAL workers did not finish in time")
 	}
 
-	// 3. Flush final sin importar qué
+	// Flush final
 	if w.writer != nil {
-		w.flushBatch() // Flush batch pendiente
+		w.flushBatch()
 		w.writer.Flush()
 	}
 
-	// 4. Sync final
 	if w.file != nil {
 		w.file.Sync()
 		w.file.Close()
