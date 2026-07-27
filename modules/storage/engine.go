@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/polarysfoundation/polarysdb/modules/common"
-	"github.com/polarysfoundation/polarysdb/modules/crypto"
+	"github.com/polarysfoundation/polarysdb/v2/modules/common"
+	"github.com/polarysfoundation/polarysdb/v2/modules/crypto"
 	"golang.org/x/sys/unix"
 )
 

@@ -5,7 +5,7 @@ import (
 	"reflect"
 	"strings"
 
-	"github.com/polarysfoundation/polarysdb/modules/gonum"
+	"github.com/polarysfoundation/polarysdb/v2/modules/gonum"
 )
 
 var (

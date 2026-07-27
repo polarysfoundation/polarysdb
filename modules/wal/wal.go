@@ -11,9 +11,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/polarysfoundation/polarysdb/modules/encoding"
-	"github.com/polarysfoundation/polarysdb/modules/logger"
-	pb "github.com/polarysfoundation/polarysdb/modules/wal/proto"
+	"github.com/polarysfoundation/polarysdb/v2/modules/encoding"
+	"github.com/polarysfoundation/polarysdb/v2/modules/logger"
+	pb "github.com/polarysfoundation/polarysdb/v2/modules/wal/proto"
 	"google.golang.org/protobuf/proto"
 )
 

@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/polarysfoundation/polarysdb/modules/common"
-	"github.com/polarysfoundation/polarysdb/modules/wal"
+	"github.com/polarysfoundation/polarysdb/v2/modules/common"
+	"github.com/polarysfoundation/polarysdb/v2/modules/wal"
 )
 
 // ============================================================================

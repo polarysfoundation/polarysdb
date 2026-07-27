@@ -15,16 +15,16 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/polarysfoundation/polarysdb/modules/backup"
-	"github.com/polarysfoundation/polarysdb/modules/common"
-	"github.com/polarysfoundation/polarysdb/modules/config"
-	"github.com/polarysfoundation/polarysdb/modules/index"
-	"github.com/polarysfoundation/polarysdb/modules/logger"
-	"github.com/polarysfoundation/polarysdb/modules/mapper"
-	"github.com/polarysfoundation/polarysdb/modules/metrics"
-	"github.com/polarysfoundation/polarysdb/modules/storage"
-	"github.com/polarysfoundation/polarysdb/modules/tx"
-	"github.com/polarysfoundation/polarysdb/modules/wal"
+	"github.com/polarysfoundation/polarysdb/v2/modules/backup"
+	"github.com/polarysfoundation/polarysdb/v2/modules/common"
+	"github.com/polarysfoundation/polarysdb/v2/modules/config"
+	"github.com/polarysfoundation/polarysdb/v2/modules/index"
+	"github.com/polarysfoundation/polarysdb/v2/modules/logger"
+	"github.com/polarysfoundation/polarysdb/v2/modules/mapper"
+	"github.com/polarysfoundation/polarysdb/v2/modules/metrics"
+	"github.com/polarysfoundation/polarysdb/v2/modules/storage"
+	"github.com/polarysfoundation/polarysdb/v2/modules/tx"
+	"github.com/polarysfoundation/polarysdb/v2/modules/wal"
 )
 
 const (

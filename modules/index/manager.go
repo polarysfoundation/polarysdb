@@ -6,7 +6,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/polarysfoundation/polarysdb/modules/logger"
+	"github.com/polarysfoundation/polarysdb/v2/modules/logger"
 )
 
 type Index struct {

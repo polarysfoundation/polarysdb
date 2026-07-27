@@ -6,7 +6,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/polarysfoundation/polarysdb/modules/logger"
+	"github.com/polarysfoundation/polarysdb/v2/modules/logger"
 )
 
 type Collector struct {
