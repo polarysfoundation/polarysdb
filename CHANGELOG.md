@@ -9,6 +9,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+Changelog
+
+## [2.0.0] - 2026-07-26
+
+### Breaking Changes
+- `Read: (any, bool) → (dst any, err error)` Values are now mapped into dst via mapper (supports structs, primitives, maps).Returns defensive deep copies — modifying returned values no longer corrupts internal state.
+- `ReadBatch: ([]any, error) → (dst any, err error)` Accepts *[]T, *[]any, *[]*T. Returns mapped deep copies, not shallow references.
+- `Exist: bool → (bool, error)` Now returns error when database is closed, allowing callers to distinguish "table doesn't exist" from "database is closed".
+- Create: now returns error when table already exists. Previously silently succeeded (idempotent). Callers should check erroror use `Exist()` before `Create()` if idempotent behavior is needed.
+
+### Bug Fixes
+- Fixed transaction snapshot isolation (deep copy prevents dirty reads)
+- Fixed WriteBatch bypassing write buffer (now routes through buffer with index updates)
+- Fixed shutdown race causing lost operations (priority drain in processWriteBuffer)
+- Fixed WAL double-close panic (removed CloseBuffer from shutdown sequence)
+- Fixed data race on `EncryptionKey` between `ChangeKey` and Export/Import
+- Fixed dirtyFlag overwritten to false during concurrent writes (CAS fix)
+- Fixed WaitGroup imbalance in startBackgroundWorkers
+- Fixed WAL Start called twice during initialization
+- Fixed fileOnChange TOCTOU race on dirtyFlag check
+- Fixed version counter incrementing on failed operations
+
+### Performance
+- `strconv` replaces `fmt.Sprintf` for numeric serialization (3-5x faster)
+- Pre-allocated buffers for write serialization
+- `engine.getKey()` uses `RLock` instead of `Lock`
+
+### Internal Changes
+- Initialization order: load from disk → WAL recovery (prevents data loss)
+- deepCopyValue ensures Read/ReadBatch/transactions return independent copies
+- `Database.to()` handles same-type deep copy, map→struct via mapper, primitives directly
+- Version tracking (atomic counter) enables optimistic concurrency for transactions
+- WAL batchWriter and periodicSync now check `ctx.Done()` for clean shutdown
+- ChangeKey is now atomic: Save with new key first, rollback on failure
+
+### Dependencies
+- Added `reflect` import for `ReadBatch` and `to()`
+- Added `encoding/json` import for `deepCopyValue` fallback
+
+---
+
 ## [1.1.4] - 2026-04-17
 
 ### Added
@@ -71,7 +112,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [v1.1.0] — 2025-10-27
 
 ### 🚀 Added
-
 * Binary Write-Ahead Log (WAL) implementation using **Protocol Buffers** for faster and more reliable persistence.
 * **Group commit mechanism** for batching concurrent writes and improving disk I/O performance.
 * **Real-time metrics module** exposing operational statistics such as read/write counts and average latency.
@@ -83,7 +123,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 * **Makefile commands** for building, testing, linting, and generating protobuf files (`make build`, `make test`, `make proto`).
 
 ### 🧰 Changed
-
 * Reworked the **write subsystem** to support asynchronous buffered writes.
 * Enhanced **AES-256 encryption** with secure key rotation and file-lock protection.
 * Improved **WAL recovery mechanism** to automatically replay incomplete transactions on startup.
@@ -91,14 +130,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 * Refined documentation with advanced usage examples (transactions, backups, metrics).
 
 ### 🐞 Fixed
-
 * Fixed concurrency issue in batched writes causing skipped or duplicated records under heavy load.
 * Corrected WAL replay logic for interrupted transactions.
 * Fixed synchronization race condition in backup rotation.
 * Resolved counter overflow issue in metrics during long-running benchmarks.
 
 ### ⚙️ Migration
-
 * Fully **backward compatible** with all `v1.0.x` versions.
 * WAL files from `v1.0.x` are automatically migrated to the new Protocol Buffers format.
 * No manual data migration required.
@@ -108,7 +145,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [v1.0.2] — 2025-10-27
 
 ### Added
-
 * Implementation of listening devices for simultaneous changes.
 * Correction in the handling of simultaneous goroutines. 
 * JSON-based Write-Ahead Log (WAL).
@@ -120,7 +156,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [v1.0.1] — 2025-06-28
 
 ### Added
-
 * First implementation for managing simultaneous changes.
 * Separation for data encryption and decryption into separate functions.
 
@@ -129,7 +164,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [v1.0.0] — 2025-03-24
 
 ### Added
-
 * Refactoring the use of Create and Exist functions.
 * The (common.Key) parameter has been passed directly for better data handling.
 * Changed the use of sync.Mutex to sync.RWMutex
@@ -139,7 +173,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [v0.1-beta] — 2025-01-28
 
 ### Added
-
 * Initial release of the in-memory database with AES encryption support.
 * Added support for creating, reading, updating, and deleting records.
 * Implemented batch read functionality.

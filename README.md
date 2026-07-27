@@ -1,6 +1,6 @@
 # 🗄️ PolarysDB
 
-[![Version](https://img.shields.io/badge/version-1.1.3-blue.svg)](https://github.com/polarysfoundation/polarysdb/releases)
+[![Version](https://img.shields.io/badge/version-2.0.0-blue.svg)](https://github.com/polarysfoundation/polarysdb/releases)
 [![Go Version](https://img.shields.io/badge/Go-1.21+-00ADD8?style=flat&logo=go)](https://golang.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Protocol Buffers](https://img.shields.io/badge/Protocol_Buffers-3.0-4285F4?style=flat)](https://protobuf.dev/)
@@ -8,6 +8,15 @@
 > **Enterprise-grade embedded database for Go with encryption, ACID transactions, and binary WAL.**
 
 PolarysDB is a high-performance, embedded database designed for Go applications that need reliability, security, and speed without the complexity of external database servers.
+
+## ⚠️ v2.0.0 Breaking Changes
+
+If upgrading from v1.x, see the [Migration Guide](#-migration-guide-v1--v2) below. Key changes:
+
+- `Read(table, key) (any, bool)` → `Read(table, key, dst any) error`
+- `ReadBatch(table) ([]any, error)` → `ReadBatch(table, dst any) error`
+- `Exist(table) bool` → `Exist(table) (bool, error)`
+- `Create(table)` now returns error on duplicate table
 
 ## ✨ Key Features
 
@@ -28,16 +37,16 @@ PolarysDB is a high-performance, embedded database designed for Go applications 
 ### 💪 Reliability
 - **Write-Ahead Log (WAL)** with Protocol Buffers
 - **Automatic recovery** from WAL on startup
-- **ACID transactions** with snapshots
+- **ACID transactions** with snapshots and conflict detection
 - **Automatic backups** with rotation
 - **Zero data loss** guarantee
 
 ### 🎯 Developer Experience
-- **Simple and clean API**
+- **Type-safe reads** with automatic mapper
+- **Defensive copies** — modifying read values never corrupts internal state
 - **Zero dependencies** (except Go stdlib + protobuf)
 - **Embedded database** (no server required)
 - **Flexible configuration**
-- **Comprehensive documentation**
 
 ## 📊 Benchmarks
 
@@ -83,7 +92,7 @@ choco install protoc
 ### Installation
 
 ```bash
-go get github.com/polarysfoundation/polarysdb
+go get github.com/polarysfoundation/polarysdb@v2.0.0
 ```
 
 ### Basic Usage
@@ -112,23 +121,42 @@ func main() {
     defer db.Close()
     
     // Create table
-    db.Create("users")
+    if err := db.Create("users"); err != nil {
+        log.Fatal(err)
+    }
     
     // Write data
-    user := map[string]any{
+    err = db.Write("users", "alice", map[string]any{
         "name":  "Alice",
         "email": "alice@example.com",
         "age":   30,
+    })
+    if err != nil {
+        log.Fatal(err)
     }
-    db.Write("users", "user1", user)
     
-    // Read data
-    if value, exists := db.Read("users", "user1"); exists {
-        fmt.Printf("User: %+v\n", value)
+    // Read into typed struct (mapper auto-maps map[string]any → struct)
+    type User struct { Name string; Email string; Age int }
+    var user User
+    err = db.Read("users", "alice", &user)
+    if err != nil {
+        log.Fatal(err)
     }
+    fmt.Printf("User: %+v\n", user)
+    
+    // Read into primitive
+    var count int
+    db.Write("config", "count", 42)
+    db.Read("config", "count", &count)
+    fmt.Printf("Count: %d\n", count)
+    
+    // Read into map (deep copy — modifying result won't corrupt DB)
+    var raw map[string]any
+    db.Read("users", "alice", &raw)
+    raw["age"] = 99  // ✅ Safe — only modifies your copy
     
     // Delete data
-    db.Delete("users", "user1")
+    db.Delete("users", "alice")
 }
 ```
 
@@ -147,26 +175,82 @@ cfg.EnableIndexes = true
 cfg.EnableTransactions = true
 cfg.SaveInterval = 10 * time.Second
 cfg.BufferSize = 2000
+cfg.OpTimeout = 5 * time.Second
+cfg.BatchTimeout = 30 * time.Second
 cfg.Debug = true
 
 db, err := polarysdb.InitWithConfig(cfg)
 ```
 
-### ACID Transactions
+### Read with Mapper
+
+`Read` automatically maps stored values into the destination type:
 
 ```go
-// Begin transaction
+// Map → Struct (most common)
+type Product struct {
+    Name     string
+    Price    float64
+    Category string
+}
+var product Product
+db.Read("products", "item1", &product)
+
+// Primitive → Primitive
+var name string
+db.Read("config", "username", &name)
+
+var active bool
+db.Read("config", "active", &active)
+
+// Map → Map (deep copy, modifying won't affect internal state)
+var data map[string]any
+db.Read("products", "item1", &data)
+data["price"] = 0 // ✅ Safe — your copy only
+```
+
+### ReadBatch with Mapper
+
+`ReadBatch` reads all values from a table into a typed slice:
+
+```go
+// Into struct slice
+var users []User
+err := db.ReadBatch("users", &users)
+
+// Into pointer slice
+var users []*User
+err := db.ReadBatch("users", &users)
+
+// Into raw slice (deep copies)
+var raw []any
+err := db.ReadBatch("users", &raw)
+```
+
+### ACID Transactions
+
+Transactions use optimistic concurrency — if data changes between 
+`BeginTransaction` and `CommitTransaction`, the commit fails with a 
+conflict error. Retry the transaction.
+
+```go
+// Begin transaction (creates deep-copy snapshot)
 tx, err := db.BeginTransaction()
 if err != nil {
     log.Fatal(err)
 }
 
-// Perform operations
+// Perform operations on snapshot
 tx.Write("accounts", "alice", map[string]any{"balance": 900})
 tx.Write("accounts", "bob", map[string]any{"balance": 600})
 
-// Commit (or Rollback on error)
+// Commit with conflict detection
 if err := db.CommitTransaction(tx); err != nil {
+    if strings.Contains(err.Error(), "transaction conflict") {
+        // Retry the transaction
+        log.Println("Conflict detected, retrying...")
+        // ... begin new transaction and retry
+    }
     tx.Rollback()
     log.Fatal(err)
 }
@@ -224,6 +308,19 @@ err := db.Import(key, "./backup.json")
 err := db.ImportEncrypted(key, "./backup.db")
 ```
 
+### Key Rotation
+
+```go
+// Change encryption key (atomic — save with new key first, rollback on failure)
+var newKey common.Key
+copy(newKey[:], []byte("new-secret-encryption-key-32b"))
+
+err := db.ChangeKey(oldKey, newKey)
+if err != nil {
+    log.Fatal(err)
+}
+```
+
 ### Monitoring and Metrics
 
 ```go
@@ -239,12 +336,90 @@ status := db.GetStatus()
 fmt.Printf("Status: %+v\n", status)
 ```
 
+## 🔄 Migration Guide (v1 → v2)
+
+### Read
+
+```go
+// v1 — returns any, caller must type-assert
+value, ok := db.Read("users", "alice")
+if !ok { /* not found */ }
+name := value.(map[string]any)["Name"].(string)
+
+// v2 — maps into destination, returns error
+var user User
+err := db.Read("users", "alice", &user)
+if err != nil { /* not found, table missing, or mapping error */ }
+name := user.Name
+
+// v2 — still works with raw maps (deep copy)
+var raw map[string]any
+err := db.Read("users", "alice", &raw)
+if err != nil { return err }
+raw["age"] = 99  // Safe — only modifies your copy
+```
+
+### ReadBatch
+
+```go
+// v1 — returns []any, caller must type-assert each element
+values, err := db.ReadBatch("users")
+for _, v := range values {
+    name := v.(map[string]any)["Name"].(string)
+}
+
+// v2 — maps into typed slice
+var users []User
+err := db.ReadBatch("users", &users)
+for _, u := range users {
+    name := u.Name
+}
+
+// v2 — raw values still available
+var raw []any
+err := db.ReadBatch("users", &raw)
+```
+
+### Exist
+
+```go
+// v1 — returns bool only
+if db.Exist("users") {
+    // table exists... or DB is closed? Can't tell.
+}
+
+// v2 — returns (bool, error)
+exists, err := db.Exist("users")
+if err != nil {
+    return err  // database is closed
+}
+if exists {
+    // table genuinely exists
+}
+```
+
+### Create
+
+```go
+// v1 — silent on duplicate
+db.Create("users")  // no error if table already exists
+
+// v2 — error on duplicate
+err := db.Create("users")
+if err != nil && strings.Contains(err.Error(), "already exists") {
+    // Table already exists, that's OK — continue
+} else if err != nil {
+    return err  // real error
+}
+```
+
 ## 🏗️ Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────┐
 │                     PUBLIC API                          │
 │  Create | Write | Read | Delete | Transactions          │
+│  ReadBatch | WriteBatch | Indexes | Backup             │
 └────────────────────┬────────────────────────────────────┘
                      │
         ┌────────────┼────────────┐
@@ -259,8 +434,8 @@ fmt.Printf("Status: %+v\n", status)
           ┌──────────────────┐
           │  Storage Engine  │
           │  - Encryption    │
-          │  - Compression   │
           │  - Atomic Writes │
+          │  - Deep Copy     │
           └────────┬─────────┘
                    │
         ┌──────────┼──────────┐
@@ -271,15 +446,31 @@ fmt.Printf("Status: %+v\n", status)
    └──────┘  └────────┘  └────────┘
 ```
 
+### Data Isolation
+
+Reads return **defensive deep copies** — stored values are recursively 
+copied before being returned. Modifying a returned map, slice, or 
+struct never affects the database's internal state. This eliminates 
+a whole class of bugs where callers accidentally mutate shared data.
+
+### Conflict Detection
+
+Transactions use optimistic concurrency via an atomic version counter:
+- `BeginTransaction` captures current version with deep-copy snapshot
+- `CommitTransaction` validates version hasn changed
+- If version mismatch → conflict error → caller retries
+
 ### Module Structure
 
 - **`polarysdb/`** - Core database implementation
 - **`wal/`** - Write-Ahead Log with Protocol Buffers
 - **`storage/`** - Storage engine with encryption
-- **`tx/`** - Transaction manager with MVCC
+- **`tx/`** - Transaction manager with optimistic concurrency
 - **`index/`** - Index manager (hash, btree)
+- **`mapper/`** - Type mapping (map → struct, primitives)
 - **`metrics/`** - Real-time metrics collector
 - **`backup/`** - Automatic backup manager
+- **`encoding/`** - Serialization with type preservation
 
 ## 📖 API Reference
 
@@ -293,14 +484,14 @@ err := db.Close()
 err := db.CloseWithTimeout(timeout)
 
 // Table operations
-exists := db.Exist(table)
+exists, err := db.Exist(table)
 err := db.Create(table)
 
 // Data operations
 err := db.Write(table, key, value)
 err := db.WriteBatch(table, records)
-value, exists := db.Read(table, key)
-values, err := db.ReadBatch(table)
+err := db.Read(table, key, dst)        // dst: *Struct, *map, *primitive
+err := db.ReadBatch(table, dst)         // dst: *[]Struct, *[]any, *[]*Struct
 err := db.Delete(table, key)
 
 // Index operations
@@ -311,7 +502,7 @@ results, err := db.QueryByIndex(table, field, value)
 tx, err := db.BeginTransaction()
 err := tx.Write(table, key, value)
 err := tx.Delete(table, key)
-err := db.CommitTransaction(tx)
+err := db.CommitTransaction(tx)  // conflict detection
 err := tx.Rollback()
 
 // Backup operations
@@ -320,10 +511,23 @@ err := db.ExportEncrypted(key, path)
 err := db.Import(key, path)
 err := db.ImportEncrypted(key, path)
 
+// Security
+err := db.ChangeKey(oldKey, newKey)
+
 // Monitoring
 metrics := db.GetMetrics()
 status := db.GetStatus()
 ```
+
+### Read Destination Types
+
+| Stored Type | Destination | Behavior |
+|-------------|-------------|---------|
+| `map[string]any` | `*Struct` | Mapper auto-maps fields |
+| `map[string]any` | `*map[string]any` | Deep copy (safe to modify) |
+| `int`, `string`, `bool` | `*int`, `*string`, `*bool` | Direct assignment |
+| `[]byte` | `*[]byte` | Deep copy |
+| Any type | Same type `*T` | Deep copy |
 
 ### Configuration Options
 
@@ -337,26 +541,31 @@ type Config struct {
     EncryptionKey common.Key
     
     // Features
-    EnableWAL          bool  // Write-Ahead Log
-    EnableBackup       bool  // Automatic backups
-    EnableIndexes      bool  // In-memory indexes
-    EnableTransactions bool  // ACID transactions
-    EnableCompression  bool  // Data compression
+    EnableWAL          bool
+    EnableBackup       bool
+    EnableIndexes      bool
+    EnableTransactions bool
+    EnableCompression  bool
     
     // Performance
-    SaveInterval    time.Duration  // Save interval
-    WALSyncInterval time.Duration  // WAL sync interval
-    BufferSize      int            // Write buffer size
-    MaxConnections  int32          // Max connections
+    SaveInterval    time.Duration
+    WALSyncInterval time.Duration
+    WatchInterval   time.Duration
+    BufferSize      int
+    MaxConnections  int32
     
     // Reliability
-    MaxRetries     int            // Retry attempts
-    RetryDelay     time.Duration  // Retry delay
-    BackupInterval time.Duration  // Backup interval
+    MaxRetries     int
+    RetryDelay     time.Duration
+    BackupInterval time.Duration
+    
+    // Timeouts
+    OpTimeout    time.Duration  // Single operation timeout
+    BatchTimeout time.Duration  // Batch operation timeout
     
     // Monitoring
-    Debug          bool  // Debug mode
-    MetricsEnabled bool  // Enable metrics
+    Debug          bool
+    MetricsEnabled bool
 }
 ```
 
@@ -417,7 +626,7 @@ make test
 go test -short ./...
 
 # Specific test
-go test -run TestHighVolumeWrites ./benchmarks/
+go test -run TestConcurrentWrites
 
 # With coverage
 go test -cover ./...
@@ -473,30 +682,32 @@ cfg.EnableWAL = true
 cfg.EnableBackup = true
 cfg.BackupInterval = 1 * time.Hour
 cfg.SaveInterval = 10 * time.Second
+cfg.OpTimeout = 5 * time.Second
+cfg.BatchTimeout = 30 * time.Second
 cfg.Debug = false
 cfg.MetricsEnabled = true
+db, _ := polarysdb.InitWithConfig(cfg)
 ```
 
 ## 🛣️ Roadmap
 
-### ✅ Version 1.1.0 (Current)
-- [x] Modular architecture
-- [x] Binary WAL with Protocol Buffers
-- [x] Group Commit optimization
-- [x] AES-256 encryption
-- [x] Basic ACID transactions
-- [x] Hash indexes
-- [x] Real-time metrics
-- [x] Automatic backups
+### ✅ Version 2.0.0 (Current)
+- [x] Type-safe reads with mapper integration
+- [x] Defensive deep copies (no silent data corruption)
+- [x] Transaction conflict detection (optimistic concurrency)
+- [x] Error returns on closed database
+- [x] Atomic key rotation with rollback
+- [x] WAL recovery order fix (load → WAL)
+- [x] Clean shutdown without panics
+- [x] WriteBatch routed through buffer with index updates
 
-### 🚧 Version 1.2.0 (In Progress)
-- [ ] MVCC (Multi-Version Concurrency Control)
-- [ ] Optimistic locking
+### 🚧 Version 2.1.0 (In Progress)
+- [ ] Per-table versioning (reduce false conflicts)
 - [ ] Configurable isolation levels
-- [ ] Deadlock detection
-- [ ] Enhanced transaction support
+- [ ] `ReadRaw()` for zero-copy reads (opt-in, caller must not modify)
+- [ ] `CreateIfNotExists()` for idempotent table creation
 
-### 📅 Version 2.0.0 (Planned)
+### 📅 Version 2.2.0 (Planned)
 - [ ] LSM-Tree storage engine
 - [ ] Incremental snapshots
 - [ ] zstd compression
@@ -505,12 +716,12 @@ cfg.MetricsEnabled = true
 - [ ] Range queries
 
 ### 🔮 Version 3.0.0 (Future)
+- [ ] MVCC (Multi-Version Concurrency Control)
 - [ ] Master-slave replication
 - [ ] Horizontal sharding
 - [ ] gRPC API
 - [ ] Prometheus metrics export
 - [ ] Full-text search
-- [ ] Query optimizer
 
 ## 📄 License
 
