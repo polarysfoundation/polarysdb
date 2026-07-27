@@ -6,9 +6,11 @@ package polarysdb
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -18,6 +20,7 @@ import (
 	"github.com/polarysfoundation/polarysdb/modules/config"
 	"github.com/polarysfoundation/polarysdb/modules/index"
 	"github.com/polarysfoundation/polarysdb/modules/logger"
+	"github.com/polarysfoundation/polarysdb/modules/mapper"
 	"github.com/polarysfoundation/polarysdb/modules/metrics"
 	"github.com/polarysfoundation/polarysdb/modules/storage"
 	"github.com/polarysfoundation/polarysdb/modules/tx"
@@ -28,12 +31,19 @@ const (
 	maxBatchSize = 100000
 )
 
-// WriteOperation representa una operación de escritura pendiente
+const (
+	OpCreate = "create"
+	OpWrite  = "write"
+	OpDelete = "delete"
+	OpBatch  = "batch"
+)
+
 type WriteOperation struct {
 	OpType    string
 	Table     string
 	Key       string
 	Value     any
+	Records   map[string]any
 	ResultCh  chan error
 	Timestamp time.Time
 }
@@ -67,8 +77,12 @@ type Database struct {
 
 	// State
 	dirtyFlag  atomic.Bool
-	lastLoaded time.Time
-	lastSave   time.Time
+	lastLoaded atomic.Value
+	lastSave   atomic.Value
+
+	pendingOps atomic.Int64
+
+	version atomic.Int64
 }
 
 // Config configuración de la base de datos
@@ -102,13 +116,17 @@ type Config struct {
 	// Monitoring
 	Debug          bool
 	MetricsEnabled bool
+
+	OpTimeout    time.Duration
+	BatchTimeout time.Duration
 }
 
 // DefaultConfig retorna configuración por defecto
 func DefaultConfig() *Config {
+	dir := "data"
 	return &Config{
-		DirPath:            "./data",
-		BackupDir:          "./backups",
+		DirPath:            dir,
+		BackupDir:          config.GetHomeSubDir("backups", dir),
 		SaveInterval:       5 * time.Second,
 		WALSyncInterval:    1 * time.Second,
 		WatchInterval:      3 * time.Second,
@@ -124,6 +142,8 @@ func DefaultConfig() *Config {
 		EnableCompression:  false,
 		Debug:              false,
 		MetricsEnabled:     true,
+		OpTimeout:          5 * time.Second,
+		BatchTimeout:       30 * time.Second,
 	}
 }
 
@@ -186,23 +206,31 @@ func InitWithConfig(cfg *Config) (*Database, error) {
 		writeBuffer: make(chan *WriteOperation, cfg.BufferSize),
 	}
 
+	// Cargar datos desde disco
+	if err := db.loadWithRetry(); err != nil {
+		cancel()
+		return nil, fmt.Errorf("failed to load database: %w", err)
+	}
+
 	// Inicializar WAL
 	if cfg.EnableWAL {
-		walPath := filepath.Join(cfg.DirPath, "polarysdb.wal")
+		walPath := filepath.Join(config.GetHomeSubDir("", cfg.DirPath), "polarysdb.wal")
 		walCfg := &wal.Config{
 			Path:         walPath,
 			SyncInterval: cfg.WALSyncInterval,
-			MaxSize:      100 * 1024 * 1024, // 100MB
+			MaxSize:      100 * 1024 * 1024,
 		}
+
 		db.wal, err = wal.New(walCfg, l)
 		if err != nil {
 			cancel()
 			return nil, fmt.Errorf("failed to initialize WAL: %w", err)
 		}
+		db.wal.SetContext(ctx)
 
-		// Recuperar desde WAL
+		// Recuperar desde WAL — aplica entries sobre db.data ya cargado
 		if err := db.recoverFromWAL(); err != nil {
-			l.Warn("WAL recovery failed, loading from snapshot: ", err)
+			l.Warn("WAL recovery failed: ", err)
 		}
 	}
 
@@ -229,15 +257,6 @@ func InitWithConfig(cfg *Config) (*Database, error) {
 	// Inicializar métricas
 	if cfg.MetricsEnabled {
 		db.metrics = metrics.NewCollector()
-	}
-
-	// Cargar datos desde disco
-	if err := db.loadWithRetry(); err != nil {
-		cancel()
-		if db.wal != nil {
-			db.wal.Close()
-		}
-		return nil, fmt.Errorf("failed to load database: %w", err)
 	}
 
 	// Iniciar workers en background
@@ -274,35 +293,42 @@ func setupDirectories(cfg *Config) error {
 }
 
 func (db *Database) startBackgroundWorkers() {
-	workers := []func(){
+	// Workers simples: wg.Add(1) del loop exterior compensado por defer wg.Done() interno
+	simpleWorkers := []func(){
 		db.processWriteBuffer,
 		db.periodicSave,
 		db.fileOnChange,
 	}
 
-	if db.config.EnableWAL && db.wal != nil {
-		workers = append(workers, db.wal.Start)
+	for _, worker := range simpleWorkers {
+		db.wg.Add(1)
+		go worker()
 	}
 
+	// Workers con lifecycle propio: wg.Add/Done manejado internamente
+	// NO agregar wg.Add(1) del loop — el worker lo maneja
 	if db.config.EnableBackup && db.backupMgr != nil {
-		workers = append(workers, func() {
-			db.wg.Add(1)
+		db.wg.Add(1)
+		go func() {
 			defer db.wg.Done()
 			db.backupMgr.Start(db.ctx, db.createBackupSnapshot)
-		})
+		}()
 	}
 
 	if db.config.MetricsEnabled && db.metrics != nil {
-		workers = append(workers, func() {
-			db.wg.Add(1)
+		db.wg.Add(1)
+		go func() {
 			defer db.wg.Done()
 			db.metrics.Start(db.ctx, db.logger)
-		})
+		}()
 	}
 
-	for _, worker := range workers {
+	if db.config.EnableWAL && db.wal != nil {
 		db.wg.Add(1)
-		go worker()
+		go func() {
+			defer db.wg.Done()
+			db.wal.Start()
+		}()
 	}
 }
 
@@ -342,7 +368,11 @@ func (db *Database) applyWALEntry(entry *wal.Entry) error {
 		}
 	case wal.OpWrite:
 		if _, ok := db.data[entry.Table]; !ok {
-			return fmt.Errorf("table %s does not exist", entry.Table)
+			db.logger.Warnf(
+				"WAL recovery: table %q auto-created during OpWrite (missing OpCreate entry)",
+				entry.Table,
+			)
+			db.data[entry.Table] = make(map[string]any)
 		}
 		db.data[entry.Table][entry.Key] = entry.Value
 	case wal.OpDelete:
@@ -350,19 +380,20 @@ func (db *Database) applyWALEntry(entry *wal.Entry) error {
 			delete(t, entry.Key)
 		}
 	}
+
 	return nil
 }
 
 // CRUD Operations
 
-func (db *Database) Exist(table string) bool {
+func (db *Database) Exist(table string) (bool, error) {
 	if db.closed.Load() {
-		return false
+		return false, fmt.Errorf("database is closed")
 	}
 	db.dataMutex.RLock()
 	defer db.dataMutex.RUnlock()
 	_, ok := db.data[table]
-	return ok
+	return ok, nil
 }
 
 func (db *Database) Create(table string) error {
@@ -371,18 +402,21 @@ func (db *Database) Create(table string) error {
 	}
 
 	op := &WriteOperation{
-		OpType:    "create",
+		OpType:    OpCreate,
 		Table:     table,
 		ResultCh:  make(chan error, 1),
 		Timestamp: time.Now(),
 	}
+	db.pendingOps.Add(1)
 
 	select {
 	case db.writeBuffer <- op:
 		return <-op.ResultCh
 	case <-db.ctx.Done():
+		db.pendingOps.Add(-1)
 		return fmt.Errorf("database is shutting down")
-	case <-time.After(5 * time.Second):
+	case <-time.After(db.config.OpTimeout):
+		db.pendingOps.Add(-1)
 		return fmt.Errorf("operation timeout")
 	}
 }
@@ -400,20 +434,23 @@ func (db *Database) Write(table, key string, value any) error {
 	}
 
 	op := &WriteOperation{
-		OpType:    "write",
+		OpType:    OpWrite,
 		Table:     table,
 		Key:       key,
 		Value:     value,
 		ResultCh:  make(chan error, 1),
 		Timestamp: time.Now(),
 	}
+	db.pendingOps.Add(1)
 
 	select {
 	case db.writeBuffer <- op:
 		return <-op.ResultCh
 	case <-db.ctx.Done():
+		db.pendingOps.Add(-1)
 		return fmt.Errorf("database is shutting down")
-	case <-time.After(5 * time.Second):
+	case <-time.After(db.config.OpTimeout):
+		db.pendingOps.Add(-1)
 		return fmt.Errorf("operation timeout")
 	}
 }
@@ -426,31 +463,25 @@ func (db *Database) WriteBatch(table string, records map[string]any) error {
 		return fmt.Errorf("batch size exceeds maximum")
 	}
 
-	db.dataMutex.Lock()
-	defer db.dataMutex.Unlock()
-
-	if _, ok := db.data[table]; !ok {
-		return fmt.Errorf("table %s does not exist", table)
+	op := &WriteOperation{
+		OpType:    OpBatch,
+		Table:     table,
+		Records:   records,
+		ResultCh:  make(chan error, 1),
+		Timestamp: time.Now(),
 	}
+	db.pendingOps.Add(1)
 
-	for key, value := range records {
-		db.data[table][key] = value
-		if db.wal != nil {
-			db.wal.Append(&wal.Entry{
-				OpType: wal.OpWrite,
-				Table:  table,
-				Key:    key,
-				Value:  value,
-			})
-		}
+	select {
+	case db.writeBuffer <- op:
+		return <-op.ResultCh
+	case <-db.ctx.Done():
+		db.pendingOps.Add(-1)
+		return fmt.Errorf("database is shutting down")
+	case <-time.After(db.config.BatchTimeout): // Timeout más largo para batches
+		db.pendingOps.Add(-1)
+		return fmt.Errorf("batch operation timeout")
 	}
-
-	db.dirtyFlag.Store(true)
-	if db.metrics != nil {
-		db.metrics.IncrementWrites(uint64(len(records)))
-	}
-
-	return nil
 }
 
 func (db *Database) Delete(table, key string) error {
@@ -459,24 +490,27 @@ func (db *Database) Delete(table, key string) error {
 	}
 
 	op := &WriteOperation{
-		OpType:    "delete",
+		OpType:    OpDelete,
 		Table:     table,
 		Key:       key,
 		ResultCh:  make(chan error, 1),
 		Timestamp: time.Now(),
 	}
+	db.pendingOps.Add(1)
 
 	select {
 	case db.writeBuffer <- op:
 		return <-op.ResultCh
 	case <-db.ctx.Done():
+		db.pendingOps.Add(-1)
 		return fmt.Errorf("database is shutting down")
-	case <-time.After(5 * time.Second):
+	case <-time.After(db.config.OpTimeout):
+		db.pendingOps.Add(-1)
 		return fmt.Errorf("operation timeout")
 	}
 }
 
-func (db *Database) Read(table, key string) (any, bool) {
+func (db *Database) Read(table, key string, dst any) error {
 	start := time.Now()
 	defer func() {
 		if db.metrics != nil {
@@ -485,7 +519,7 @@ func (db *Database) Read(table, key string) (any, bool) {
 	}()
 
 	if db.closed.Load() {
-		return nil, false
+		return fmt.Errorf("database is closed")
 	}
 
 	db.dataMutex.RLock()
@@ -493,17 +527,27 @@ func (db *Database) Read(table, key string) (any, bool) {
 
 	if t, ok := db.data[table]; ok {
 		value, exists := t[key]
+		if !exists {
+			return fmt.Errorf("data with key=%s does not exists", key)
+		}
+
 		if db.metrics != nil {
 			db.metrics.IncrementReads()
 		}
-		return value, exists
+
+		if err := db.to(value, dst); err != nil {
+			return err
+		}
+
+		return nil
 	}
-	return nil, false
+
+	return fmt.Errorf("table does not exist")
 }
 
-func (db *Database) ReadBatch(table string) ([]any, error) {
+func (db *Database) ReadBatch(table string, dst any) error {
 	if db.closed.Load() {
-		return nil, fmt.Errorf("database is closed")
+		return fmt.Errorf("database is closed")
 	}
 
 	db.dataMutex.RLock()
@@ -511,22 +555,67 @@ func (db *Database) ReadBatch(table string) ([]any, error) {
 
 	t, ok := db.data[table]
 	if !ok {
-		return nil, fmt.Errorf("table %s does not exist", table)
+		return fmt.Errorf("table %s does not exist", table)
 	}
 
-	v := make([]any, 0, len(t))
-	for _, d := range t {
-		v = append(v, d)
+	// Validar que dst es un puntero no-nil a un slice
+	dstVal := reflect.ValueOf(dst)
+	if dstVal.Kind() != reflect.Ptr || dstVal.IsNil() {
+		return fmt.Errorf("dst must be a non-nil pointer to a slice")
 	}
+
+	sliceVal := dstVal.Elem()
+	if sliceVal.Kind() != reflect.Slice {
+		return fmt.Errorf("dst must be a pointer to a slice, got pointer to %s", sliceVal.Kind())
+	}
+
+	elemType := sliceVal.Type().Elem()
+
+	// Reset slice, pre-allocar capacidad
+	results := reflect.MakeSlice(sliceVal.Type(), 0, len(t))
+
+	for _, d := range t {
+		src := deepCopyValue(d) // copia defensiva vs db.data interno
+
+		switch elemType.Kind() {
+		case reflect.Interface:
+			// *[]any — appendar valor deep-copiado directamente
+			if src == nil {
+				results = reflect.Append(results, reflect.Zero(elemType))
+			} else {
+				results = reflect.Append(results, reflect.ValueOf(src))
+			}
+
+		case reflect.Pointer:
+			// []*T — crear *T, mappear, appendar puntero
+			concreteType := elemType.Elem()
+			elemPtr := reflect.New(concreteType)
+			if err := db.to(src, elemPtr.Interface()); err != nil {
+				return fmt.Errorf("mapping error for key: %w", err)
+			}
+			results = reflect.Append(results, elemPtr)
+
+		default:
+			// []T — crear *T, mappear, appendar valor (no puntero)
+			elemPtr := reflect.New(elemType)
+			if err := db.to(src, elemPtr.Interface()); err != nil {
+				return fmt.Errorf("mapping error for key: %w", err)
+			}
+			results = reflect.Append(results, elemPtr.Elem())
+		}
+	}
+
+	// Asignar el slice resultante al destino
+	sliceVal.Set(results)
 
 	if db.metrics != nil {
 		db.metrics.IncrementReads()
 	}
-	return v, nil
+
+	return nil
 }
 
 // Index operations
-
 func (db *Database) CreateIndex(table, field string) error {
 	if !db.config.EnableIndexes || db.indexMgr == nil {
 		return fmt.Errorf("indexes are disabled")
@@ -536,7 +625,11 @@ func (db *Database) CreateIndex(table, field string) error {
 	tableData := db.data[table]
 	db.dataMutex.RUnlock()
 
-	return db.indexMgr.CreateIndex(table, field, tableData)
+	if err := db.indexMgr.CreateIndex(table, field, tableData); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func (db *Database) QueryByIndex(table, field string, value any) ([]any, error) {
@@ -565,28 +658,33 @@ func (db *Database) QueryByIndex(table, field string, value any) ([]any, error) 
 }
 
 // Transaction operations
-
 func (db *Database) BeginTransaction() (*tx.Transaction, error) {
+	if db.closed.Load() {
+		return nil, fmt.Errorf("database is closed")
+	}
+
 	if !db.config.EnableTransactions || db.txManager == nil {
 		return nil, fmt.Errorf("transactions are disabled")
 	}
 
 	db.dataMutex.RLock()
-	snapshot := db.createSnapshot()
+	snapshot, version := db.createSnapshot()
 	db.dataMutex.RUnlock()
 
-	return db.txManager.Begin(snapshot), nil
+	txn := db.txManager.Begin(snapshot)
+	txn.SetSnapshotVersion(version)
+	return txn, nil
 }
 
-func (db *Database) createSnapshot() map[string]map[string]any {
-	snapshot := make(map[string]map[string]any)
+func (db *Database) createSnapshot() (map[string]map[string]any, int64) {
+	snapshot := make(map[string]map[string]any, len(db.data))
 	for table, records := range db.data {
-		snapshot[table] = make(map[string]any)
+		snapshot[table] = make(map[string]any, len(records))
 		for key, value := range records {
-			snapshot[table][key] = value
+			snapshot[table][key] = deepCopyValue(value) // ← DEEP COPY
 		}
 	}
-	return snapshot
+	return snapshot, db.version.Load() // ← capturar version
 }
 
 func (db *Database) CommitTransaction(txn *tx.Transaction) error {
@@ -602,6 +700,16 @@ func (db *Database) CommitTransaction(txn *tx.Transaction) error {
 	db.dataMutex.Lock()
 	defer db.dataMutex.Unlock()
 
+	snapshotVersion := txn.SnapshotVersion()
+	currentVersion := db.version.Load()
+	if currentVersion != snapshotVersion {
+		return fmt.Errorf(
+			"transaction conflict: data modified since snapshot (expected v%d, current v%d). Retry the transaction",
+			snapshotVersion, currentVersion,
+		)
+	}
+
+	// Aplicar cambios (sin cambios)
 	for table, records := range changes {
 		if _, ok := db.data[table]; !ok {
 			db.data[table] = make(map[string]any)
@@ -615,6 +723,7 @@ func (db *Database) CommitTransaction(txn *tx.Transaction) error {
 		}
 	}
 
+	db.version.Add(1)
 	db.dirtyFlag.Store(true)
 	return nil
 }
@@ -634,31 +743,41 @@ func (db *Database) processWriteBuffer() {
 		}
 
 		db.dataMutex.Lock()
+		successCount := 0
+
 		for _, op := range pendingOps {
-			// ✅ FIX: Verificar que op no sea nil
 			if op == nil {
 				continue
 			}
 
-			// ✅ FIX: Verificar que ResultCh no sea nil
 			if op.ResultCh == nil {
 				continue
 			}
 
 			var err error
 			switch op.OpType {
-			case "create":
-				if _, ok := db.data[op.Table]; !ok {
+			case OpCreate:
+				if _, ok := db.data[op.Table]; ok {
+					err = fmt.Errorf("table %s already exists", op.Table)
+				} else {
 					db.data[op.Table] = make(map[string]any)
 				}
+
 				if db.wal != nil {
-					db.wal.Append(&wal.Entry{
+					if err := db.wal.Append(&wal.Entry{
 						OpType: wal.OpCreate,
 						Table:  op.Table,
-					})
+					}); err != nil {
+						db.logger.Errorf("WAL append failed: %v (op: %s/%s)", err, op.Table, op.Key)
+						// Decisión: rollback la op o continuar sin WAL?
+						// Recomendación: fail la op para garantizar durability
+						err = fmt.Errorf("WAL create failed: %w", err)
+						// Rollback: revertir la escritura en memoria
+						delete(db.data, op.Table)
+					}
 				}
-
-			case "write":
+				successCount++
+			case OpWrite:
 				if t, ok := db.data[op.Table]; ok {
 					oldVal := t[op.Key]
 					t[op.Key] = op.Value
@@ -675,18 +794,26 @@ func (db *Database) processWriteBuffer() {
 						db.metrics.IncrementWrites(1)
 					}
 					if db.wal != nil {
-						db.wal.Append(&wal.Entry{
+						if err := db.wal.Append(&wal.Entry{
 							OpType: wal.OpWrite,
 							Table:  op.Table,
 							Key:    op.Key,
 							Value:  op.Value,
-						})
+						}); err != nil {
+							db.logger.Errorf("WAL append failed: %v (op: %s/%s)", err, op.Table, op.Key)
+							// Decisión: rollback la op o continuar sin WAL?
+							// Recomendación: fail la op para garantizar durability
+							err = fmt.Errorf("WAL write failed: %w", err)
+							// Rollback: revertir la escritura en memoria
+							t[op.Key] = oldVal
+						}
 					}
+					successCount++
 				} else {
 					err = fmt.Errorf("table %s does not exist", op.Table)
 				}
 
-			case "delete":
+			case OpDelete:
 				if t, ok := db.data[op.Table]; ok {
 					oldVal := t[op.Key]
 					delete(t, op.Key)
@@ -703,54 +830,120 @@ func (db *Database) processWriteBuffer() {
 						db.metrics.IncrementDeletes()
 					}
 					if db.wal != nil {
-						db.wal.Append(&wal.Entry{
+						if err := db.wal.Append(&wal.Entry{
 							OpType: wal.OpDelete,
 							Table:  op.Table,
 							Key:    op.Key,
-						})
+						}); err != nil {
+							db.logger.Errorf("WAL append failed: %v (op: %s/%s)", err, op.Table, op.Key)
+							// Decisión: rollback la op o continuar sin WAL?
+							// Recomendación: fail la op para garantizar durability
+							err = fmt.Errorf("WAL delete failed: %w", err)
+							// Rollback: revertir la escritura en memoria
+							t[op.Key] = oldVal
+						}
 					}
+					successCount++
 				} else {
 					err = fmt.Errorf("table %s does not exist", op.Table)
 				}
+			case OpBatch:
+				if t, ok := db.data[op.Table]; ok {
+					for key, value := range op.Records {
+						oldVal := t[key]
+						t[key] = value
+
+						// Actualizar índices
+						if db.indexMgr != nil {
+							fields := db.indexMgr.GetIndexedFields(op.Table)
+							for _, field := range fields {
+								db.indexMgr.UpdateIndex(op.Table, field, key, oldVal, value)
+							}
+						}
+
+						// Append al WAL
+						if db.wal != nil {
+							if err := db.wal.Append(&wal.Entry{
+								OpType: wal.OpWrite,
+								Table:  op.Table,
+								Key:    key,
+								Value:  value,
+							}); err != nil {
+								db.logger.Errorf("WAL append failed: %v (op: %s/%s)", err, op.Table, op.Key)
+								// Decisión: rollback la op o continuar sin WAL?
+								// Recomendación: fail la op para garantizar durability
+								err = fmt.Errorf("WAL write failed: %w", err)
+								// Rollback: revertir la escritura en memoria
+								t[op.Key] = oldVal
+							}
+						}
+					}
+
+					if db.metrics != nil {
+						db.metrics.IncrementWrites(uint64(len(op.Records)))
+					}
+					successCount++
+
+				} else {
+					err = fmt.Errorf("table %s does not exist", op.Table)
+				}
+			default:
+				err = fmt.Errorf("unknown operation type: %s", op.OpType)
+
 			}
 
 			if err != nil && db.metrics != nil {
 				db.metrics.IncrementFailedOps()
 			}
+			db.pendingOps.Add(-1)
 
-			// ✅ FIX: Enviar error solo si el canal no está cerrado
 			select {
 			case op.ResultCh <- err:
 			default:
 				// Canal cerrado o lleno, ignorar
 			}
 		}
-		db.dirtyFlag.Store(true)
-		db.dataMutex.Unlock()
 
+		if successCount > 0 {
+			db.version.Add(1)
+			db.dirtyFlag.Store(true)
+		}
+
+		db.dataMutex.Unlock()
 		pendingOps = pendingOps[:0]
 	}
 
 	for {
+		// Primero intentar drain del canal (prioridad)
 		select {
-		case <-db.ctx.Done():
-			processBatch()
-			return
 		case op, ok := <-db.writeBuffer:
-			// ✅ FIX: Verificar que el canal no esté cerrado
 			if !ok {
 				processBatch()
-				return
+				return // Canal cerrado y vacío → salir limpiamente
 			}
-			// ✅ FIX: Verificar que op no sea nil
 			if op != nil {
 				pendingOps = append(pendingOps, op)
 				if len(pendingOps) >= 50 {
 					processBatch()
 				}
 			}
-		case <-batchTicker.C:
-			processBatch()
+		default:
+			// Canal vacío por ahora → verificar context
+			select {
+			case <-db.ctx.Done():
+				processBatch()
+				return
+			case op, ok := <-db.writeBuffer:
+				if !ok {
+					processBatch()
+					return
+				}
+				if op != nil {
+					pendingOps = append(pendingOps, op)
+				}
+			case <-batchTicker.C:
+				processBatch()
+			}
 		}
 	}
 }
@@ -801,25 +994,29 @@ func (db *Database) fileOnChange() {
 				continue
 			}
 
-			if info.ModTime().Equal(db.lastLoaded) && !db.lastLoaded.IsZero() {
+			lastLoaded, _ := db.lastLoaded.Load().(time.Time)
+			if info.ModTime().Equal(lastLoaded) && !lastLoaded.IsZero() {
 				continue
 			}
 
-			if !db.dirtyFlag.Load() && len(db.writeBuffer) == 0 {
-				db.dataMutex.Lock()
-				err = db.load()
+			db.dataMutex.Lock()
+			// Re-check dentro del lock — si dirty, skip
+			if db.dirtyFlag.Load() || db.pendingOps.Load() > 0 {
 				db.dataMutex.Unlock()
+				continue
+			}
 
-				if err != nil {
-					db.logger.Warn("Error reloading database: ", err)
-				}
+			err = db.load()
+			db.dataMutex.Unlock()
+
+			if err != nil {
+				db.logger.Warn("Error reloading database: ", err)
 			}
 		}
 	}
 }
 
 // Storage operations
-
 func (db *Database) flushToDisk() error {
 	start := time.Now()
 
@@ -828,15 +1025,12 @@ func (db *Database) flushToDisk() error {
 	db.dataMutex.RUnlock()
 
 	if err == nil {
-		db.dirtyFlag.Store(false)
-		db.lastSave = time.Now()
+		db.dirtyFlag.CompareAndSwap(true, false)
+
+		db.lastSave.Store(time.Now())
 
 		if db.metrics != nil {
 			db.metrics.RecordSaveDuration(time.Since(start))
-		}
-
-		if db.config.Debug {
-			db.logger.Infof("Database saved in %v", time.Since(start))
 		}
 	}
 
@@ -862,7 +1056,7 @@ func (db *Database) load() error {
 	}
 
 	db.data = data
-	db.lastLoaded = modTime
+	db.lastLoaded.Store(modTime)
 	return nil
 }
 
@@ -953,11 +1147,17 @@ func (db *Database) ChangeKey(oldKey, newKey common.Key) error {
 		return fmt.Errorf("database is closed")
 	}
 
+	db.dataMutex.RLock()
 	if !common.IsEqual(db.config.EncryptionKey[:], oldKey[:]) {
+		db.dataMutex.RUnlock()
 		return fmt.Errorf("old key does not match")
 	}
+	db.dataMutex.RUnlock()
 
+	db.dataMutex.Lock()
 	db.config.EncryptionKey = newKey
+	db.dataMutex.Unlock()
+
 	db.storage.UpdateKey(newKey)
 	db.dirtyFlag.Store(true)
 
@@ -965,7 +1165,6 @@ func (db *Database) ChangeKey(oldKey, newKey common.Key) error {
 }
 
 // Metrics and monitoring
-
 func (db *Database) GetMetrics() *metrics.Snapshot {
 	if db.metrics == nil {
 		return &metrics.Snapshot{}
@@ -975,6 +1174,7 @@ func (db *Database) GetMetrics() *metrics.Snapshot {
 
 func (db *Database) GetStatus() map[string]any {
 	m := db.GetMetrics()
+	lastSave, _ := db.lastSave.Load().(time.Time)
 	return map[string]any{
 		"uptime_seconds":    time.Since(m.Uptime).Seconds(),
 		"closed":            db.closed.Load(),
@@ -986,12 +1186,11 @@ func (db *Database) GetStatus() map[string]any {
 		"avg_read_latency":  m.AvgReadLatency,
 		"avg_write_latency": m.AvgWriteLatency,
 		"buffered_ops":      len(db.writeBuffer),
-		"last_save":         db.lastSave,
+		"last_save":         lastSave,
 	}
 }
 
 // Close operations
-
 func (db *Database) Close() error {
 	return db.CloseWithTimeout(30 * time.Second)
 }
@@ -999,46 +1198,31 @@ func (db *Database) Close() error {
 // CloseWithTimeout cierra la base de datos con timeout mejorado
 func (db *Database) CloseWithTimeout(timeout time.Duration) error {
 	if !db.closed.CompareAndSwap(false, true) {
-		return nil // Already closed
+		return nil
 	}
 
 	db.logger.Info("Initiating database shutdown...")
 
-	// 1. Cerrar el buffer de escritura PRIMERO (detiene nuevas operaciones)
+	// 1. Cerrar buffer → processWriteBuffer draina todo antes de salir
 	close(db.writeBuffer)
 
-	// 2. Esperar un poco para que se procesen operaciones pendientes
-	time.Sleep(100 * time.Millisecond)
-
-	// 3. Cancelar contexto (señal a todos los workers)
+	// 2. Cancelar contexto (processWriteBuffer ya no lo usa para salir,
+	//    solo otros workers)
 	if db.cancel != nil {
 		db.cancel()
 	}
 
-	// 4. Cerrar WAL buffer si existe
-	if db.config.EnableWAL && db.wal != nil {
-		// NO cerrar el buffer aquí, dejar que WAL lo maneje
-	}
-
-	// 5. Esperar workers con timeout
+	// 4. Esperar workers con timeout
 	done := make(chan struct{})
 	go func() {
 		db.wg.Wait()
 
-		// 6. Flush final de datos
 		if db.dirtyFlag.Load() {
-			db.logger.Info("Flushing pending data to disk...")
-			if err := db.flushToDisk(); err != nil {
-				db.logger.Error("Failed to flush on close: ", err)
-			}
+			db.flushToDisk()
 		}
 
-		// 7. Cerrar WAL
 		if db.wal != nil {
-			db.logger.Info("Closing WAL...")
-			if err := db.wal.Close(); err != nil {
-				db.logger.Error("WAL close error: ", err)
-			}
+			db.wal.Close()
 		}
 
 		close(done)
@@ -1049,14 +1233,89 @@ func (db *Database) CloseWithTimeout(timeout time.Duration) error {
 		db.logger.Info("Database closed successfully")
 		return nil
 	case <-time.After(timeout):
-		db.logger.Warn("Timeout waiting for database to close")
-
-		// Forzar flush incluso con timeout
-		if db.dirtyFlag.Load() {
-			db.logger.Info("Force flushing data...")
-			db.flushToDisk()
-		}
-
 		return fmt.Errorf("timeout waiting for database to close")
+	}
+}
+
+func (db *Database) to(src any, dst any) error {
+	if src == nil {
+		return fmt.Errorf("source value is nil")
+	}
+
+	dstVal := reflect.ValueOf(dst)
+	if dstVal.Kind() != reflect.Ptr || dstVal.IsNil() {
+		return fmt.Errorf("dst must be a non-nil pointer")
+	}
+
+	srcVal := reflect.ValueOf(src)
+	dstElem := dstVal.Elem()
+
+	// Case 1: src y dst son el mismo tipo → deep copy
+	// Handles: map[string]any→*map[string]any, []byte→*[]byte, int→*int, etc.
+	if srcVal.Type() == dstElem.Type() {
+		copied := deepCopyValue(src)
+		copiedVal := reflect.ValueOf(copied)
+		if copiedVal.Type() == dstElem.Type() {
+			dstElem.Set(copiedVal)
+			return nil
+		}
+	}
+
+	// Case 2: map[string]any → struct via mapper
+	dataMap, ok := src.(map[string]any)
+	if ok {
+		return mapper.MapToStruct(dataMap, dst)
+	}
+
+	// Case 3: Primitive direct assignment (compatible types)
+	if dstElem.Kind() == srcVal.Kind() {
+		dstElem.Set(srcVal)
+		return nil
+	}
+
+	// Case 4: Fallback
+	return mapper.ToStruct(src, dst)
+}
+
+// deepCopyValue realiza una copia profunda recursiva de cualquier valor.
+// Los tipos primitivos (bool, int, string, etc.) se copian por valor naturalmente.
+// Los tipos referencia (maps, slices) se copian recursivamente.
+// Tipos desconocidos se delegan a JSON round-trip como fallback.
+func deepCopyValue(v any) any {
+	if v == nil {
+		return nil
+	}
+
+	switch val := v.(type) {
+	case bool, int, int8, int16, int32, int64,
+		uint, uint8, uint16, uint32, uint64,
+		float32, float64, string:
+		return val
+	case []byte:
+		cp := make([]byte, len(val))
+		copy(cp, val)
+		return cp
+	case map[string]any:
+		cp := make(map[string]any, len(val))
+		for k, child := range val {
+			cp[k] = deepCopyValue(child)
+		}
+		return cp
+	case []any:
+		cp := make([]any, len(val))
+		for i, child := range val {
+			cp[i] = deepCopyValue(child)
+		}
+		return cp
+	default:
+		data, err := json.Marshal(val)
+		if err != nil {
+			return val
+		}
+		var result any
+		if err := json.Unmarshal(data, &result); err != nil {
+			return val
+		}
+		return result
 	}
 }

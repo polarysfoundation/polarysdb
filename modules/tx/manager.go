@@ -10,18 +10,19 @@ import (
 )
 
 type Transaction struct {
-	ID        string
-	Snapshot  map[string]map[string]any
-	Changes   map[string]map[string]any
-	Committed bool
-	Aborted   bool
-	CreatedAt time.Time
-	mutex     sync.Mutex
+	ID              string
+	Snapshot        map[string]map[string]any
+	Changes         map[string]map[string]any
+	Committed       bool
+	Aborted         bool
+	CreatedAt       time.Time
+	snapshotVersion int64
+	mutex           sync.Mutex
 }
 
 type Manager struct {
 	transactions sync.Map
-	counter      uint64
+	counter      atomic.Uint64
 	logger       *logger.Logger
 	activeTxs    atomic.Int32
 	committedTxs atomic.Uint64
@@ -35,7 +36,7 @@ func NewManager(log *logger.Logger) *Manager {
 }
 
 func (m *Manager) Begin(snapshot map[string]map[string]any) *Transaction {
-	id := fmt.Sprintf("tx_%d_%d", time.Now().UnixNano(), atomic.AddUint64(&m.counter, 1))
+	id := fmt.Sprintf("tx_%d_%d", time.Now().UnixNano(), m.counter.Add(1))
 
 	tx := &Transaction{
 		ID:        id,
@@ -112,6 +113,14 @@ func (tx *Transaction) Delete(table, key string) error {
 	tx.Changes[table][key] = nil
 
 	return nil
+}
+
+func (t *Transaction) SnapshotVersion() int64 {
+	return t.snapshotVersion
+}
+
+func (t *Transaction) SetSnapshotVersion(v int64) {
+	t.snapshotVersion = v
 }
 
 func (m *Manager) GetStats() map[string]any {

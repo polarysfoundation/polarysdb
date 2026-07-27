@@ -2,8 +2,8 @@ package wal
 
 import (
 	"bufio"
+	"context"
 	"encoding/binary"
-	"encoding/json"
 	"fmt"
 	"hash/crc32"
 	"io"
@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/polarysfoundation/polarysdb/modules/encoding"
 	"github.com/polarysfoundation/polarysdb/modules/logger"
 	pb "github.com/polarysfoundation/polarysdb/modules/wal/proto"
 	"google.golang.org/protobuf/proto"
@@ -21,6 +22,7 @@ const (
 	OpWrite  uint8 = 2
 	OpDelete uint8 = 3
 	OpCommit uint8 = 4
+	OpBatch  uint8 = 5
 
 	maxEntrySize = 10 * 1024 * 1024 // 10MB max per entry
 	headerSize   = 8                // 4 bytes length + 4 bytes checksum
@@ -67,6 +69,11 @@ type WAL struct {
 	closed     bool
 	closeMutex sync.Mutex
 	wg         sync.WaitGroup
+
+	bufferClosed bool
+
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 // New crea una nueva instancia de WAL
@@ -108,6 +115,10 @@ func New(cfg *Config, log *logger.Logger) (*WAL, error) {
 
 // Start inicia los workers del WAL
 func (w *WAL) Start() {
+	if w.ctx == nil {
+		w.logger.Warn("WAL context not set, using background context")
+		w.ctx = context.Background()
+	}
 	w.wg.Add(2)
 	go w.batchWriter()
 	go w.periodicSync()
@@ -142,6 +153,7 @@ func (w *WAL) batchWriter() {
 	defer ticker.Stop()
 
 	for {
+		// Prioridad: drain buffer primero
 		select {
 		case entry, ok := <-w.buffer:
 			if !ok {
@@ -158,8 +170,25 @@ func (w *WAL) batchWriter() {
 				w.flushBatch()
 			}
 
-		case <-ticker.C:
-			w.flushBatch()
+		default:
+			// Buffer vacío — verificar contexto
+			select {
+			case <-w.ctx.Done():
+				w.flushBatch()
+				return
+			case entry, ok := <-w.buffer:
+				if !ok {
+					w.flushBatch()
+					return
+				}
+
+				w.batchMutex.Lock()
+				w.pendingBatch = append(w.pendingBatch, entry)
+				w.batchMutex.Unlock()
+
+			case <-ticker.C:
+				w.flushBatch()
+			}
 		}
 	}
 }
@@ -214,7 +243,7 @@ func (w *WAL) writeEntry(entry *Entry) error {
 
 	// Serializar valor si existe
 	if entry.Value != nil {
-		valueBytes, err := serializeValue(entry.Value)
+		valueBytes, err := encoding.SerializeValue(entry.Value)
 		if err != nil {
 			return fmt.Errorf("failed to serialize value: %w", err)
 		}
@@ -263,22 +292,30 @@ func (w *WAL) periodicSync() {
 	defer w.wg.Done()
 
 	if w.config.GroupCommit {
-		return // Group commit ya hace sync
+		return
 	}
 
 	ticker := time.NewTicker(w.config.SyncInterval)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		w.closeMutex.Lock()
-		if w.closed {
+	for {
+		select {
+		case <-ticker.C:
+			w.closeMutex.Lock()
+			if w.closed {
+				w.closeMutex.Unlock()
+				return
+			}
 			w.closeMutex.Unlock()
-			return
-		}
-		w.closeMutex.Unlock()
 
-		if err := w.file.Sync(); err != nil {
-			w.logger.Errorf("WAL sync failed: %v", err)
+			if err := w.file.Sync(); err != nil {
+				w.logger.Errorf("WAL sync failed: %v", err)
+			}
+
+		case <-w.ctx.Done():
+			// Flush final antes de salir
+			w.file.Sync()
+			return
 		}
 	}
 }
@@ -356,7 +393,7 @@ func readEntry(reader *bufio.Reader) (*Entry, error) {
 
 	// Deserializar valor si existe
 	if len(pbEntry.Value) > 0 {
-		value, err := deserializeValue(pbEntry.Value)
+		value, err := encoding.DeserializeValue(pbEntry.Value)
 		if err != nil {
 			return nil, fmt.Errorf("failed to deserialize value: %w", err)
 		}
@@ -406,10 +443,22 @@ func (w *WAL) rotate() error {
 	w.logger.Infof("WAL rotated successfully. Old file: %s", backupPath)
 
 	// Eliminar backup antiguo después de un tiempo
+	w.wg.Add(1) // Registrar en WaitGroup
 	go func() {
-		time.Sleep(30 * time.Second)
-		if err := os.Remove(backupPath); err != nil {
-			w.logger.Warnf("Failed to remove old WAL backup: %v", err)
+		defer w.wg.Done()
+		timer := time.NewTimer(30 * time.Second)
+		defer timer.Stop()
+
+		select {
+		case <-timer.C:
+			// Eliminar backup después del tiempo
+			if err := os.Remove(backupPath); err != nil {
+				w.logger.Warnf("Failed to remove old WAL backup: %v", err)
+			}
+		case <-w.ctx.Done():
+			// Cancelación solicitada, no eliminar (o eliminar si se desea)
+			w.logger.Info("Rotation cleanup cancelled, not removing backup")
+			return
 		}
 	}()
 
@@ -463,6 +512,18 @@ func (w *WAL) GetStats() map[string]any {
 	}
 }
 
+// CloseBuffer cierra solo el canal de buffer para que Append falle rápido
+func (w *WAL) CloseBuffer() {
+	w.closeMutex.Lock()
+	if w.bufferClosed || w.buffer == nil {
+		w.closeMutex.Unlock()
+		return
+	}
+	close(w.buffer)
+	w.bufferClosed = true // ← NUEVO
+	w.closeMutex.Unlock()
+}
+
 // Close cierra el WAL de forma segura
 func (w *WAL) Close() error {
 	w.closeMutex.Lock()
@@ -471,35 +532,40 @@ func (w *WAL) Close() error {
 		return nil
 	}
 	w.closed = true
+
+	// Solo cerrar el buffer si no se cerró antes
+	if !w.bufferClosed {
+		close(w.buffer)
+		w.bufferClosed = true
+	}
 	w.closeMutex.Unlock()
+
+	// Cancelar contexto para detener workers de limpieza (rotate)
+	if w.cancel != nil {
+		w.cancel()
+	}
 
 	w.logger.Info("Closing WAL...")
 
-	// 1. Cerrar canal (detiene nuevas entradas)
-	close(w.buffer)
-
-	// 2. Esperar workers con timeout corto
+	// Esperar a que batchWriter y periodicSync terminen
 	done := make(chan struct{})
 	go func() {
 		w.wg.Wait()
 		close(done)
 	}()
 
-	// Timeout de 5 segundos para workers
 	select {
 	case <-done:
-		// Workers terminaron
 	case <-time.After(5 * time.Second):
-		w.logger.Warn("WAL workers did not finish in time, forcing close")
+		w.logger.Warn("WAL workers did not finish in time")
 	}
 
-	// 3. Flush final sin importar qué
+	// Flush final
 	if w.writer != nil {
-		w.flushBatch() // Flush batch pendiente
+		w.flushBatch()
 		w.writer.Flush()
 	}
 
-	// 4. Sync final
 	if w.file != nil {
 		w.file.Sync()
 		w.file.Close()
@@ -509,48 +575,6 @@ func (w *WAL) Close() error {
 	return nil
 }
 
-// ============================================================================
-// Helper functions para serialización de valores
-// ============================================================================
-
-// serializeValue convierte un valor Go a bytes
-func serializeValue(value any) ([]byte, error) {
-	switch v := value.(type) {
-	case []byte:
-		return v, nil
-	case string:
-		return []byte(v), nil
-	case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
-		return []byte(fmt.Sprintf("%v", v)), nil
-	case float32, float64:
-		return []byte(fmt.Sprintf("%v", v)), nil
-	case bool:
-		if v {
-			return []byte("true"), nil
-		}
-		return []byte("false"), nil
-	default:
-		// Para tipos complejos (maps, structs), usar JSON
-		data, err := json.Marshal(v)
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal complex value: %w", err)
-		}
-		return data, nil
-	}
-}
-
-// deserializeValue convierte bytes de vuelta a un valor Go
-func deserializeValue(data []byte) (any, error) {
-	if len(data) == 0 {
-		return nil, nil
-	}
-
-	// Intentar deserializar como JSON primero (para tipos complejos)
-	var jsonValue any
-	if err := json.Unmarshal(data, &jsonValue); err == nil {
-		return jsonValue, nil
-	}
-
-	// Si falla, retornar como string
-	return string(data), nil
+func (w *WAL) SetContext(ctx context.Context) {
+	w.ctx, w.cancel = context.WithCancel(ctx)
 }

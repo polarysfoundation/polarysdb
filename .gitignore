@@ -22,3 +22,8 @@ stress_*/
 .vscode/
 .idea/
 *.swp
+.DS_Store
+AUDIT.md
+RELEASE_NOTE.md
+PR.md
+CHANGELOG.temp.md
