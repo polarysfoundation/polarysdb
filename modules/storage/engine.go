@@ -140,43 +140,43 @@ func (e *Engine) ImportPlain(path string) (map[string]map[string]any, error) {
 }
 
 func (e *Engine) Serialize(data map[string]map[string]any) ([]byte, error) {
-    key := e.getKey()
+	key := e.getKey()
 
-    jsonData, err := json.Marshal(data)
-    if err != nil {
-        return nil, err
-    }
-    return crypto.Encrypt(jsonData, key)
+	jsonData, err := json.Marshal(data)
+	if err != nil {
+		return nil, err
+	}
+	return crypto.Encrypt(jsonData, key)
 }
 
 func (e *Engine) ExportEncrypted(data map[string]map[string]any, path string) error {
-    key := e.getKey()
+	key := e.getKey()
 
-    jsonData, err := json.MarshalIndent(data, "", "  ")
-    if err != nil {
-        return err
-    }
-    encryptedData, err := crypto.Encrypt(jsonData, key)
-    if err != nil {
-        return err
-    }
-    return os.WriteFile(path, encryptedData, 0600)
+	jsonData, err := json.MarshalIndent(data, "", "  ")
+	if err != nil {
+		return err
+	}
+	encryptedData, err := crypto.Encrypt(jsonData, key)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, encryptedData, 0600)
 }
 
 func (e *Engine) ImportEncrypted(path string) (map[string]map[string]any, error) {
-    key := e.getKey()
+	key := e.getKey()
 
-    encryptedData, err := os.ReadFile(path)
-    if err != nil {
-        return nil, err
-    }
-    decryptedData, err := crypto.Decrypt(encryptedData, key)
-    if err != nil {
-        return nil, err
-    }
-    var result map[string]map[string]any
-    err = json.Unmarshal(decryptedData, &result)
-    return result, err
+	encryptedData, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	decryptedData, err := crypto.Decrypt(encryptedData, key)
+	if err != nil {
+		return nil, err
+	}
+	var result map[string]map[string]any
+	err = json.Unmarshal(decryptedData, &result)
+	return result, err
 }
 
 func (e *Engine) UpdateKey(newKey common.Key) {

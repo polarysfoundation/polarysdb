@@ -11,6 +11,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/polarysfoundation/polarysdb/v2/modules/common"
+	"github.com/polarysfoundation/polarysdb/v2/modules/crypto"
 	"github.com/polarysfoundation/polarysdb/v2/modules/encoding"
 	"github.com/polarysfoundation/polarysdb/v2/modules/logger"
 	pb "github.com/polarysfoundation/polarysdb/v2/modules/wal/proto"
@@ -45,6 +47,7 @@ type Config struct {
 	MaxSize      int64
 	GroupCommit  bool
 	BatchSize    int
+	Key          common.Key
 }
 
 // WAL representa el Write-Ahead Log
@@ -256,6 +259,13 @@ func (w *WAL) writeEntry(entry *Entry) error {
 		return fmt.Errorf("failed to marshal protobuf: %w", err)
 	}
 
+	if !w.config.Key.IsZero() {
+		data, err = crypto.Encrypt(data, w.config.Key)
+		if err != nil {
+			return fmt.Errorf("failed to encrypt entry: %v", err)
+		}
+	}
+
 	if len(data) > maxEntrySize {
 		return fmt.Errorf("entry too large: %d bytes", len(data))
 	}
@@ -335,7 +345,7 @@ func (w *WAL) ReadAll() ([]*Entry, error) {
 	entries := make([]*Entry, 0)
 
 	for {
-		entry, err := readEntry(reader)
+		entry, err := w.readEntry(reader)
 		if err == io.EOF {
 			break
 		}
@@ -350,7 +360,7 @@ func (w *WAL) ReadAll() ([]*Entry, error) {
 }
 
 // readEntry lee una entrada individual del WAL
-func readEntry(reader *bufio.Reader) (*Entry, error) {
+func (w *WAL) readEntry(reader *bufio.Reader) (*Entry, error) {
 	// Leer header
 	header := make([]byte, headerSize)
 	if _, err := io.ReadFull(reader, header); err != nil {
@@ -374,6 +384,14 @@ func readEntry(reader *bufio.Reader) (*Entry, error) {
 	actualChecksum := crc32.ChecksumIEEE(data)
 	if actualChecksum != expectedChecksum {
 		return nil, fmt.Errorf("checksum mismatch: expected %d, got %d", expectedChecksum, actualChecksum)
+	}
+
+	if !w.config.Key.IsZero() {
+		var err error
+		data, err = crypto.Decrypt(data, w.config.Key)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decrypt entry: %v", err)
+		}
 	}
 
 	// Unmarshal protobuf - AQUÍ SE USA EL PROTOBUF REAL
