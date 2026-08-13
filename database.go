@@ -219,6 +219,7 @@ func InitWithConfig(cfg *Config) (*Database, error) {
 			Path:         walPath,
 			SyncInterval: cfg.WALSyncInterval,
 			MaxSize:      100 * 1024 * 1024,
+			Key:          cfg.EncryptionKey,
 		}
 
 		db.wal, err = wal.New(walCfg, l)

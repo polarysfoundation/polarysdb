@@ -37,6 +37,11 @@ func (k Key) Bytes() []byte {
 	return k[:]
 }
 
+func (k Key) IsZero() bool {
+	var zero Key
+	return k == zero
+}
+
 // HexToKey converts a hexadecimal string to a Key.
 func HexToKey(s string) Key {
 	if has0xPrefix(s) {
