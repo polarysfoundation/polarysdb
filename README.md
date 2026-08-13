@@ -1,6 +1,6 @@
 # 🗄️ PolarysDB
 
-[![Version](https://img.shields.io/badge/version-2.0.0-blue.svg)](https://github.com/polarysfoundation/polarysdb/releases)
+[![Version](https://img.shields.io/badge/version-2.1.0-blue.svg)](https://github.com/polarysfoundation/polarysdb/releases)
 [![Go Version](https://img.shields.io/badge/Go-1.21+-00ADD8?style=flat&logo=go)](https://golang.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Protocol Buffers](https://img.shields.io/badge/Protocol_Buffers-3.0-4285F4?style=flat)](https://protobuf.dev/)
@@ -9,7 +9,7 @@
 
 PolarysDB is a high-performance, embedded database designed for Go applications that need reliability, security, and speed without the complexity of external database servers.
 
-## ⚠️ v2.0.0 Breaking Changes
+## 🎯 v2.1.0 - Encryption of WAL Entries.
 
 If upgrading from v1.x, see the [Migration Guide](#-migration-guide-v1--v2) below. Key changes:
 
@@ -691,7 +691,7 @@ db, _ := polarysdb.InitWithConfig(cfg)
 
 ## 🛣️ Roadmap
 
-### ✅ Version 2.0.0 (Current)
+### ✅ Version 2.0.0 (Previous)
 - [x] Type-safe reads with mapper integration
 - [x] Defensive deep copies (no silent data corruption)
 - [x] Transaction conflict detection (optimistic concurrency)
@@ -701,13 +701,16 @@ db, _ := polarysdb.InitWithConfig(cfg)
 - [x] Clean shutdown without panics
 - [x] WriteBatch routed through buffer with index updates
 
-### 🚧 Version 2.1.0 (In Progress)
+### ✅ Version 2.1.0 (Current)
+- [x] Encryption of WAL Entries.
+
+### 🚧 Version 2.2.0 (In Progress)
 - [ ] Per-table versioning (reduce false conflicts)
 - [ ] Configurable isolation levels
 - [ ] `ReadRaw()` for zero-copy reads (opt-in, caller must not modify)
 - [ ] `CreateIfNotExists()` for idempotent table creation
 
-### 📅 Version 2.2.0 (Planned)
+### 📅 Version 2.3.0 (Planned)
 - [ ] LSM-Tree storage engine
 - [ ] Incremental snapshots
 - [ ] zstd compression
@@ -783,3 +786,4 @@ If you find this project useful, please consider giving it a ⭐ on GitHub!
 <p align="center">
   <a href="#-polarysdb">Back to top</a>
 </p>
+
