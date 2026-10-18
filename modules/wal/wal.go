@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/polarysfoundation/polarysdb/v2/modules/common"
@@ -73,6 +74,11 @@ type WAL struct {
 	closeMutex sync.Mutex
 	wg         sync.WaitGroup
 
+	// PATCH 2: flag atómico para coordinar rotaciones.
+	// writeEntry lo levanta cuando size > MaxSize; rotateWatcher lo baja
+	// cuando termina la rotación. Evita múltiples rotaciones solapadas.
+	rotating atomic.Bool
+
 	bufferClosed bool
 
 	ctx    context.Context
@@ -122,9 +128,11 @@ func (w *WAL) Start() {
 		w.logger.Warn("WAL context not set, using background context")
 		w.ctx = context.Background()
 	}
-	w.wg.Add(2)
+	// PATCH 2: agregar rotateWatcher como worker adicional.
+	w.wg.Add(3)
 	go w.batchWriter()
 	go w.periodicSync()
+	go w.rotateWatcher()
 }
 
 // Append agrega una entrada al buffer del WAL
@@ -196,17 +204,23 @@ func (w *WAL) batchWriter() {
 	}
 }
 
-// flushBatch escribe el lote pendiente al disco
+// flushBatch escribe el lote pendiente al disco.
+// Wrapper público que toma el lock; la lógica real está en flushBatchLocked.
 func (w *WAL) flushBatch() error {
 	w.batchMutex.Lock()
+	defer w.batchMutex.Unlock()
+	return w.flushBatchLocked()
+}
+
+// flushBatchLocked es idéntico a flushBatch pero asume que el caller ya
+// tiene batchMutex tomado. Evita reentrancia desde rotate().
+func (w *WAL) flushBatchLocked() error {
 	if len(w.pendingBatch) == 0 {
-		w.batchMutex.Unlock()
 		return nil
 	}
 
 	batch := w.pendingBatch
 	w.pendingBatch = make([]*Entry, 0, w.config.BatchSize)
-	w.batchMutex.Unlock()
 
 	// Group Commit: escribir todas las entradas juntas
 	for _, entry := range batch {
@@ -233,7 +247,9 @@ func (w *WAL) flushBatch() error {
 	return nil
 }
 
-// writeEntry escribe una entrada individual al WAL usando Protocol Buffers
+// writeEntry escribe una entrada individual al WAL usando Protocol Buffers.
+// REQUIERE: el caller debe tener batchMutex tomado (vía flushBatch o
+// flushBatchLocked). No toma ningún lock internamente.
 func (w *WAL) writeEntry(entry *Entry) error {
 	// Convertir a protobuf
 	pbEntry := &pb.WALEntry{
@@ -289,9 +305,12 @@ func (w *WAL) writeEntry(entry *Entry) error {
 	w.size += int64(headerSize + len(data))
 	w.entries++
 
-	// Verificar si necesitamos rotar
+	// PATCH 2: si excedemos MaxSize, levantar el flag atómico para que
+	// rotateWatcher procese la rotación de forma síncrona y segura.
+	// CompareAndSwap garantiza que solo una goroutine levanta el flag,
+	// evitando múltiples rotaciones solapadas.
 	if w.size > w.config.MaxSize {
-		go w.rotate()
+		w.rotating.CompareAndSwap(false, true)
 	}
 
 	return nil
@@ -318,14 +337,66 @@ func (w *WAL) periodicSync() {
 			}
 			w.closeMutex.Unlock()
 
+			// PATCH 1: flush del bufio.Writer al kernel page cache
+			// ANTES de file.Sync(). Sin esto, hasta 256KB de entries
+			// "aceptadas" por Append() no llegan al kernel y file.Sync()
+			// no las toca — se pierden ante crash del proceso.
+			//
+			// Tomamos batchMutex brevemente para que no se entrelace
+			// con writes parciales de flushBatch/writeEntry (que pueden
+			// estar a mitad de escribir un entry: header escrito pero
+			// data no, lo que dejaría el bufio.Writer en estado
+			// inconsistente).
+			w.batchMutex.Lock()
+			flushErr := w.writer.Flush()
+			w.batchMutex.Unlock()
+
+			if flushErr != nil {
+				w.logger.Errorf("WAL writer flush failed: %v", flushErr)
+				continue
+			}
+
 			if err := w.file.Sync(); err != nil {
 				w.logger.Errorf("WAL sync failed: %v", err)
 			}
 
 		case <-w.ctx.Done():
 			// Flush final antes de salir
+			w.batchMutex.Lock()
+			w.writer.Flush()
+			w.batchMutex.Unlock()
 			w.file.Sync()
 			return
+		}
+	}
+}
+
+// PATCH 2: rotateWatcher es un worker dedicado que procesa rotaciones
+// de forma síncrona y segura. Reemplaza el `go w.rotate()` original que
+// tenía race condition con flushBatch/writeEntry.
+//
+// Cada 100ms chequea el flag `rotating`. Si está levantado, llama
+// rotate() (que toma los locks necesarios en orden consistente) y lo
+// baja al terminar. Si rotate() falla, lo loguea y baja el flag de
+// todas formas para no atascar rotaciones futuras.
+func (w *WAL) rotateWatcher() {
+	defer w.wg.Done()
+
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-w.ctx.Done():
+			return
+		case <-ticker.C:
+			if !w.rotating.Load() {
+				continue
+			}
+			if err := w.rotate(); err != nil {
+				w.logger.Errorf("WAL rotation failed: %v", err)
+			}
+			w.rotating.Store(false)
 		}
 	}
 }
@@ -421,7 +492,15 @@ func (w *WAL) readEntry(reader *bufio.Reader) (*Entry, error) {
 	return entry, nil
 }
 
-// rotate rota el archivo WAL cuando es muy grande
+// rotate rota el archivo WAL cuando es muy grande.
+//
+// PATCH 2: ahora toma closeMutex → batchMutex en orden consistente y
+// usa flushBatchLocked() para evitar reentrancia. Es llamada de forma
+// síncrona por rotateWatcher() (no más `go w.rotate()` que tenía race
+// condition con flushBatch/writeItem).
+//
+// Lock ordering en todo el archivo: closeMutex → batchMutex. Nadie toma
+// batchMutex → closeMutex, así que no hay deadlock potential.
 func (w *WAL) rotate() error {
 	w.closeMutex.Lock()
 	defer w.closeMutex.Unlock()
@@ -432,26 +511,39 @@ func (w *WAL) rotate() error {
 
 	w.logger.Info("Rotating WAL file...")
 
-	// Flush pendiente
-	w.flushBatch()
-	w.writer.Flush()
-	w.file.Sync()
+	// Tomar batchMutex DESPUÉS de closeMutex (orden consistente).
+	// flushBatch solo toma batchMutex (no closeMutex), así que no hay
+	// deadlock.
+	w.batchMutex.Lock()
+	defer w.batchMutex.Unlock()
+
+	// Flush pendiente bajo el lock. Usar flushBatchLocked para no
+	// reentrar batchMutex.
+	if err := w.flushBatchLocked(); err != nil {
+		return fmt.Errorf("rotate: flushBatch failed: %w", err)
+	}
+	if err := w.writer.Flush(); err != nil {
+		return fmt.Errorf("rotate: writer flush failed: %w", err)
+	}
+	if err := w.file.Sync(); err != nil {
+		return fmt.Errorf("rotate: file sync failed: %w", err)
+	}
 
 	// Cerrar archivo actual
 	if err := w.file.Close(); err != nil {
-		return err
+		return fmt.Errorf("rotate: close failed: %w", err)
 	}
 
 	// Renombrar a backup con timestamp
 	backupPath := fmt.Sprintf("%s.%d.backup", w.path, time.Now().Unix())
 	if err := os.Rename(w.path, backupPath); err != nil {
-		return err
+		return fmt.Errorf("rotate: rename failed: %w", err)
 	}
 
 	// Abrir nuevo archivo
 	f, err := os.OpenFile(w.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
 	if err != nil {
-		return err
+		return fmt.Errorf("rotate: open new file failed: %w", err)
 	}
 
 	w.file = f
@@ -461,7 +553,7 @@ func (w *WAL) rotate() error {
 	w.logger.Infof("WAL rotated successfully. Old file: %s", backupPath)
 
 	// Eliminar backup antiguo después de un tiempo
-	w.wg.Add(1) // Registrar en WaitGroup
+	w.wg.Add(1)
 	go func() {
 		defer w.wg.Done()
 		timer := time.NewTimer(30 * time.Second)
@@ -469,12 +561,10 @@ func (w *WAL) rotate() error {
 
 		select {
 		case <-timer.C:
-			// Eliminar backup después del tiempo
 			if err := os.Remove(backupPath); err != nil {
 				w.logger.Warnf("Failed to remove old WAL backup: %v", err)
 			}
 		case <-w.ctx.Done():
-			// Cancelación solicitada, no eliminar (o eliminar si se desea)
 			w.logger.Info("Rotation cleanup cancelled, not removing backup")
 			return
 		}
@@ -493,6 +583,19 @@ func (w *WAL) Truncate() error {
 	}
 
 	w.logger.Info("Truncating WAL...")
+
+	// PATCH 3: esperar a que batchWriter drene w.buffer antes de
+	// flushBatch. Sin esto, entries en el channel se pierden cuando
+	// os.Remove() borra el archivo antes de que se escriban.
+	//
+	// waitForBufferDrain no toma batchMutex (solo hace polling sobre
+	// len(w.buffer)), así que no hay deadlock con el closeMutex que
+	// ya tenemos.
+	if err := w.waitForBufferDrain(5 * time.Second); err != nil {
+		// No abortar el truncate, pero loguear: el caller decide
+		// si la pérdida potencial de entries es aceptable.
+		w.logger.Warnf("WAL Truncate: buffer drain timeout, some entries may be lost: %v", err)
+	}
 
 	// Flush y cerrar
 	w.flushBatch()
@@ -538,7 +641,7 @@ func (w *WAL) CloseBuffer() {
 		return
 	}
 	close(w.buffer)
-	w.bufferClosed = true // ← NUEVO
+	w.bufferClosed = true
 	w.closeMutex.Unlock()
 }
 
@@ -565,7 +668,7 @@ func (w *WAL) Close() error {
 
 	w.logger.Info("Closing WAL...")
 
-	// Esperar a que batchWriter y periodicSync terminen
+	// Esperar a que batchWriter, periodicSync y rotateWatcher terminen
 	done := make(chan struct{})
 	go func() {
 		w.wg.Wait()

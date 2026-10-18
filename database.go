@@ -162,6 +162,17 @@ func InitWithConfig(cfg *Config) (*Database, error) {
 		cfg = DefaultConfig()
 	}
 
+	// Recalcular BackupDir si el caller cambió DirPath del default.
+	//     // DefaultConfig setea BackupDir contra dir="data" (home-based).
+	//     // Si el caller overridea DirPath (absoluto o relativo), recalcular
+	//     // BackupDir para que sea consistente. Solo recalcular si el caller
+	//     // NO overrideó BackupDir explícitamente (BackupDir sigue siendo el
+	//     // default de "data").
+	defaultBackupDir := config.GetHomeSubDir("backups", "data")
+	if cfg.BackupDir == defaultBackupDir && cfg.DirPath != "data" {
+		cfg.BackupDir = config.GetHomeSubDir("backups", cfg.DirPath)
+	}
+
 	if err := validateConfig(cfg); err != nil {
 		return nil, fmt.Errorf("invalid config: %w", err)
 	}
@@ -561,7 +572,7 @@ func (db *Database) ReadBatch(table string, dst any) error {
 
 	// Validar que dst es un puntero no-nil a un slice
 	dstVal := reflect.ValueOf(dst)
-	if dstVal.Kind() != reflect.Ptr || dstVal.IsNil() {
+	if dstVal.Kind() != reflect.Pointer || dstVal.IsNil() {
 		return fmt.Errorf("dst must be a non-nil pointer to a slice")
 	}
 
