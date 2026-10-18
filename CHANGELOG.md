@@ -11,6 +11,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Changelog
 
+## [2.1.1] — 2026-10-18
+
+### Added
+- `Database.Flush()` — verifiable snapshot flush: waits for pending ops, takes the exclusive data lock, saves, reloads and verifies via JSON-normalized comparison, syncs the WAL when supported, then clears the dirty flag. Exits early when nothing is dirty.
+- `WAL.Sync()` — explicit synchronous durability: buffer drain → writer flush → `fsync`.
+- `waitForBufferDrain` helper with a bounded timeout.
+
+### Fixed
+- Periodic sync now flushes the `bufio.Writer` before `file.Sync()`, preventing up to 256KB of acknowledged entries from being stranded in user space.
+- WAL rotations are serialized through a dedicated `rotateWatcher` worker gated by an atomic `rotating` flag (`CompareAndSwap`), eliminating overlapping rotations and races with `flushBatch`/`writeEntry`.
+- `Truncate()` now waits for the write buffer to drain before removing the file, so queued entries are never silently dropped.
+- Consistent lock ordering (`closeMutex → batchMutex`); `flushBatch` split into locking and locked variants to avoid reentrancy.
+- `getHomeSubDir` now respects an absolute `DirPath`; `InitWithConfig` recalculates `BackupDir` when `DirPath` is overridden, keeping backups colocated with data.
+- Replace deprecated `reflect.Ptr` with `reflect.Pointer` in `ReadBatch`.
+
+### Notes
+- Behavior change only for callers passing an absolute `DirPath` — previously such paths were incorrectly nested under the home directory.
+- New test suites: `flush_test.go` (persistence, dirty-flag semantics, pending-op waiting, idempotency, concurrent writes vs `Flush`, WAL-enabled flush, closed-DB behavior) and `wal_sync_test.go` (periodic flush, safe rotation under load, atomic rotate flag, truncate drain, close idempotency, append-after-close, encrypted round-trip).
+- Shared test helpers (`newTestDB`, `newTestDBNoWAL`, `newTestDBWithWAL`, `newTestDBWithConfig`) isolate state in temp dirs and disable noisy background timers.
+- Run `go test ./... -race` to validate concurrency-sensitive changes.
+
+---
+
 ## [2.1.0] — 2026-08-13
 
 ### Added

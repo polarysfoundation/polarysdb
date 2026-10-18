@@ -1,6 +1,6 @@
 # 🗄️ PolarysDB
 
-[![Version](https://img.shields.io/badge/version-2.1.0-blue.svg)](https://github.com/polarysfoundation/polarysdb/releases)
+[![Version](https://img.shields.io/badge/version-2.1.1-blue.svg)](https://github.com/polarysfoundation/polarysdb/releases)
 [![Go Version](https://img.shields.io/badge/Go-1.21+-00ADD8?style=flat&logo=go)](https://golang.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Protocol Buffers](https://img.shields.io/badge/Protocol_Buffers-3.0-4285F4?style=flat)](https://protobuf.dev/)
@@ -9,7 +9,18 @@
 
 PolarysDB is a high-performance, embedded database designed for Go applications that need reliability, security, and speed without the complexity of external database servers.
 
-## 🎯 v2.1.0 - Encryption of WAL Entries.
+## 🎯 v2.1.1 - WAL Durability & Rotation Fixes
+
+This is a **patch release** on top of v2.1.0 (WAL encryption). It closes three data-loss / race windows in the WAL and makes the snapshot flush verifiable end to end. **No API or on-disk format changes** — drop-in upgrade from v2.1.0.
+
+Key fixes:
+
+- **Periodic sync now flushes the `bufio.Writer` before `fsync`** — up to 256KB of acknowledged entries could previously be stranded in user space.
+- **WAL rotations are serialized** through a dedicated `rotateWatcher` worker gated by an atomic `rotating` flag — overlapping rotations that raced with `flushBatch`/`writeEntry` are eliminated.
+- **`Truncate()` waits for the write buffer to drain** before removing the file — queued entries are no longer silently dropped.
+- **New `Database.Flush()`** provides verifiable snapshot durability (pending ops → lock → save → reload+verify → WAL sync → clear dirty flag).
+- **New `WAL.Sync()`** for explicit synchronous durability (buffer drain → writer flush → fsync).
+- **Absolute `DirPath` is now honored**; `BackupDir` is recalculated when `DirPath` is overridden — no more state leaking into `~/data` in tests or absolute-path deployments.
 
 If upgrading from v1.x, see the [Migration Guide](#-migration-guide-v1--v2) below. Key changes:
 
@@ -39,6 +50,7 @@ If upgrading from v1.x, see the [Migration Guide](#-migration-guide-v1--v2) belo
 - **Automatic recovery** from WAL on startup
 - **ACID transactions** with snapshots and conflict detection
 - **Automatic backups** with rotation
+- **Verifiable snapshot flush** with `Flush()` API
 - **Zero data loss** guarantee
 
 ### 🎯 Developer Experience
@@ -92,7 +104,7 @@ choco install protoc
 ### Installation
 
 ```bash
-go get github.com/polarysfoundation/polarysdb@v2.0.0
+go get github.com/polarysfoundation/polarysdb@v2.1.1
 ```
 
 ### Basic Usage
@@ -181,6 +193,8 @@ cfg.Debug = true
 
 db, err := polarysdb.InitWithConfig(cfg)
 ```
+
+> **Path handling (v2.1.1):** `InitWithConfig` honors an absolute `DirPath` as-is. When `DirPath` is overridden from the default, `BackupDir` is recalculated to stay colocated with the data directory.
 
 ### Read with Mapper
 
@@ -288,6 +302,34 @@ for i := 0; i < 1000; i++ {
 
 // Write batch (10x faster than individual writes)
 if err := db.WriteBatch("logs", batch); err != nil {
+    log.Fatal(err)
+}
+```
+
+### Explicit Snapshot Flush (v2.1.1)
+
+`Flush()` provides verifiable snapshot durability. It waits for pending 
+operations, takes the exclusive data lock, saves, reloads and verifies 
+the snapshot via a JSON-normalized comparison, syncs the WAL when 
+supported, and only then clears the dirty flag. It exits early when 
+nothing is dirty.
+
+```go
+// Ensure all in-flight writes are durably persisted before
+// a planned shutdown or an external backup.
+if err := db.Flush(); err != nil {
+    log.Fatal(err)
+}
+```
+
+### Synchronous WAL Durability (v2.1.1)
+
+For workloads that need an explicit, synchronous durability point 
+without waiting for the periodic sync interval:
+
+```go
+// Drain buffer → flush writer → fsync
+if err := db.WAL().Sync(); err != nil {
     log.Fatal(err)
 }
 ```
@@ -419,7 +461,7 @@ if err != nil && strings.Contains(err.Error(), "already exists") {
 ┌─────────────────────────────────────────────────────────┐
 │                     PUBLIC API                          │
 │  Create | Write | Read | Delete | Transactions          │
-│  ReadBatch | WriteBatch | Indexes | Backup             │
+│  ReadBatch | WriteBatch | Indexes | Backup | Flush     │
 └────────────────────┬────────────────────────────────────┘
                      │
         ┌────────────┼────────────┐
@@ -457,8 +499,23 @@ a whole class of bugs where callers accidentally mutate shared data.
 
 Transactions use optimistic concurrency via an atomic version counter:
 - `BeginTransaction` captures current version with deep-copy snapshot
-- `CommitTransaction` validates version hasn changed
+- `CommitTransaction` validates version hasn't changed
 - If version mismatch → conflict error → caller retries
+
+### WAL Durability Guarantees (v2.1.1)
+
+The WAL serializes the following operations to guarantee acknowledged 
+writes survive crashes:
+
+- **Periodic sync** flushes the `bufio.Writer` before `fsync`, so no 
+  acknowledged entry remains stranded in user space.
+- **Rotations are serialized** through a dedicated `rotateWatcher` 
+  worker gated by an atomic `rotating` flag (`CompareAndSwap`), 
+  eliminating overlapping rotations and races with `flushBatch`/`writeEntry`.
+- **`Truncate()` waits** for the write buffer to drain before removing 
+  the file, so queued entries are never silently dropped.
+- **Lock ordering** is consistent (`closeMutex → batchMutex`); `rotate()` 
+  reuses the locked `flushBatchLocked` variant to avoid reentrancy.
 
 ### Module Structure
 
@@ -505,6 +562,10 @@ err := tx.Delete(table, key)
 err := db.CommitTransaction(tx)  // conflict detection
 err := tx.Rollback()
 
+// Durability (v2.1.1)
+err := db.Flush()                // verifiable snapshot flush
+err := db.WAL().Sync()           // explicit WAL sync
+
 // Backup operations
 err := db.Export(key, path)
 err := db.ExportEncrypted(key, path)
@@ -534,8 +595,8 @@ status := db.GetStatus()
 ```go
 type Config struct {
     // Paths
-    DirPath   string
-    BackupDir string
+    DirPath   string   // Absolute paths honored as-is (v2.1.1)
+    BackupDir string   // Recalculated when DirPath is overridden (v2.1.1)
     
     // Security
     EncryptionKey common.Key
@@ -628,6 +689,9 @@ go test -short ./...
 # Specific test
 go test -run TestConcurrentWrites
 
+# Race detector (required for WAL/durability changes)
+go test ./... -race
+
 # With coverage
 go test -cover ./...
 go test -coverprofile=coverage.out ./...
@@ -691,7 +755,7 @@ db, _ := polarysdb.InitWithConfig(cfg)
 
 ## 🛣️ Roadmap
 
-### ✅ Version 2.0.0 (Previous)
+### ✅ Version 2.0.0
 - [x] Type-safe reads with mapper integration
 - [x] Defensive deep copies (no silent data corruption)
 - [x] Transaction conflict detection (optimistic concurrency)
@@ -701,8 +765,17 @@ db, _ := polarysdb.InitWithConfig(cfg)
 - [x] Clean shutdown without panics
 - [x] WriteBatch routed through buffer with index updates
 
-### ✅ Version 2.1.0 (Current)
-- [x] Encryption of WAL Entries.
+### ✅ Version 2.1.0
+- [x] Encryption of WAL entries
+
+### ✅ Version 2.1.1 (Patch — Current)
+- [x] Periodic sync flushes user-space buffer before `fsync`
+- [x] Serialized WAL rotations via atomic `rotating` flag
+- [x] `Truncate()` waits for buffer drain
+- [x] `Database.Flush()` — verifiable snapshot durability
+- [x] `WAL.Sync()` — explicit synchronous durability
+- [x] Absolute `DirPath` handling and backup colocation
+- [x] `reflect.Pointer` replacement for deprecated `reflect.Ptr`
 
 ### 🚧 Version 2.2.0 (In Progress)
 - [ ] Per-table versioning (reduce false conflicts)
@@ -740,7 +813,7 @@ Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for gui
 2. Create a feature branch (`git checkout -b feature/amazing`)
 3. Make your changes
 4. Add tests for new functionality
-5. Ensure all tests pass (`make test`)
+5. Ensure all tests pass (`make test && go test ./... -race`)
 6. Commit your changes (`git commit -m 'Add amazing feature'`)
 7. Push to the branch (`git push origin feature/amazing`)
 8. Open a Pull Request
@@ -786,4 +859,3 @@ If you find this project useful, please consider giving it a ⭐ on GitHub!
 <p align="center">
   <a href="#-polarysdb">Back to top</a>
 </p>
-
