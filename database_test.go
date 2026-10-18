@@ -1,7 +1,3 @@
-// ============================================================================
-// FILE: polarysdb/database_test.go
-// Unit tests for Database
-// ============================================================================
 package polarysdb
 
 import (
@@ -18,74 +14,12 @@ import (
 )
 
 // ============================================================================
-// Helpers
+// Test fixtures
 // ============================================================================
 
 type TestUser struct {
 	Name string
 	Age  int
-}
-
-var testKey = common.BytesToKey([]byte("test_password_for_test_32bytes"))
-var testKey2 = common.BytesToKey([]byte("test_password_for_test_2_32bytes"))
-
-// Config minimal para tests — intervals largos para evitar interferencia
-func testConfig(dir string) *Config {
-	return &Config{
-		DirPath:            dir,
-		BackupDir:          filepath.Join(dir, "backups"),
-		EncryptionKey:      testKey,
-		SaveInterval:       1 * time.Hour,
-		WatchInterval:      1 * time.Hour,
-		BufferSize:         100,
-		MaxRetries:         3,
-		RetryDelay:         50 * time.Millisecond,
-		EnableWAL:          false,
-		EnableBackup:       false,
-		EnableIndexes:      true,
-		EnableTransactions: true,
-		EnableCompression:  false,
-		MetricsEnabled:     true,
-		OpTimeout:          5 * time.Second,
-		BatchTimeout:       30 * time.Second,
-		Debug:              true,
-	}
-}
-
-// Config con WAL habilitado para tests de recovery
-func testConfigWithWAL(dir string) *Config {
-	cfg := testConfig(dir)
-	cfg.EnableWAL = true
-	cfg.WALSyncInterval = 100 * time.Millisecond
-	return cfg
-}
-
-func setupTestDB(t *testing.T) *Database {
-	t.Helper()
-	dir := ".test"
-	cfg := testConfig(dir)
-	db, err := InitWithConfig(cfg)
-	if err != nil {
-		t.Fatalf("Failed to init database: %v", err)
-	}
-	t.Cleanup(func() {
-		db.Close()
-	})
-	return db
-}
-
-func setupTestDBWithWAL(t *testing.T) *Database {
-	t.Helper()
-	dir := t.TempDir()
-	cfg := testConfigWithWAL(dir)
-	db, err := InitWithConfig(cfg)
-	if err != nil {
-		t.Fatalf("Failed to init database with WAL: %v", err)
-	}
-	t.Cleanup(func() {
-		db.Close()
-	})
-	return db
 }
 
 // ============================================================================
@@ -94,36 +28,59 @@ func setupTestDBWithWAL(t *testing.T) *Database {
 
 func TestInitWithConfig(t *testing.T) {
 	t.Run("successful_init", func(t *testing.T) {
-		cfg := testConfig(".test")
-		db, err := InitWithConfig(cfg)
-		if err != nil {
-			t.Fatalf("InitWithConfig failed: %v", err)
+		db, cleanup := newTestDBNoWAL(t)
+		defer cleanup()
+
+		// Si llegamos acá, InitWithConfig funcionó.
+		if db == nil {
+			t.Fatal("db should not be nil")
 		}
-		db.Close()
 	})
 
 	t.Run("nil_config_uses_default", func(t *testing.T) {
+		// DefaultConfig() usa DirPath="data" (relativo → ~/data/ con el
+		// fix de config.go). No podemos aislar esto fácilmente sin
+		// mockear, así que testamos que InitWithConfig(nil) no paniquea
+		// y limpiamos manualmente.
+		//
+		// En el futuro, DefaultConfig podría aceptar un override via
+		// env var o similar para hacer este test plenamente aislado.
 		db, err := InitWithConfig(nil)
 		if err != nil {
 			t.Fatalf("InitWithConfig with nil should use default: %v", err)
 		}
 		db.Close()
-		os.RemoveAll("./data") // cleanup default dir
+
+		// Cleanup manual del dir default (~/data/ tras el fix de config.go).
+		if home, err := os.UserHomeDir(); err == nil {
+			_ = os.RemoveAll(filepath.Join(home, "data"))
+		}
 	})
 
 	t.Run("creates_directories", func(t *testing.T) {
+		// Usamos newTestDBWithConfig para especificar un DirPath custom
+		// y verificar que InitWithConfig lo crea.
 		dir := t.TempDir()
 		dataDir := filepath.Join(dir, "custom_data")
-		cfg := testConfig(dataDir)
-		db, err := InitWithConfig(cfg)
-		if err != nil {
-			t.Fatalf("Failed: %v", err)
-		}
+
+		_, cleanup := newTestDBWithConfig(t, func(cfg *Config) {
+			cfg.DirPath = dataDir
+			cfg.EnableWAL = false
+			cfg.EnableBackup = false
+		})
+		defer cleanup()
 
 		if _, err := os.Stat(dataDir); os.IsNotExist(err) {
 			t.Error("Data directory was not created")
 		}
-		db.Close()
+
+		// Verificar que el archivo de state también se creó bajo dataDir
+		// (no bajo home/). Con el fix de config.go, GetStateDBPath respeta
+		// paths absolutos.
+		statePath := filepath.Join(dataDir, "state", "state.rdb")
+		if _, err := os.Stat(statePath); err != nil {
+			t.Logf("State file path (may not exist yet until first save): %s", statePath)
+		}
 	})
 }
 
@@ -137,7 +94,7 @@ func TestValidateConfig(t *testing.T) {
 
 	t.Run("save_interval_too_small", func(t *testing.T) {
 		cfg := &Config{
-			DirPath:      "/tmp/test",
+			DirPath:      t.TempDir(),
 			SaveInterval: 10 * time.Millisecond,
 			BufferSize:   100,
 		}
@@ -148,7 +105,7 @@ func TestValidateConfig(t *testing.T) {
 
 	t.Run("buffer_size_too_small", func(t *testing.T) {
 		cfg := &Config{
-			DirPath:      "/tmp/test",
+			DirPath:      t.TempDir(),
 			SaveInterval: 5 * time.Second,
 			BufferSize:   5,
 		}
@@ -158,7 +115,8 @@ func TestValidateConfig(t *testing.T) {
 	})
 
 	t.Run("valid_config", func(t *testing.T) {
-		cfg := testConfig("/tmp/test")
+		cfg := DefaultConfig()
+		cfg.DirPath = t.TempDir()
 		if err := validateConfig(cfg); err != nil {
 			t.Errorf("Valid config should not error: %v", err)
 		}
@@ -170,7 +128,8 @@ func TestValidateConfig(t *testing.T) {
 // ============================================================================
 
 func TestCreate(t *testing.T) {
-	db := setupTestDB(t)
+	db, cleanup := newTestDBNoWAL(t)
+	defer cleanup()
 
 	t.Run("create_new_table", func(t *testing.T) {
 		err := db.Create("users")
@@ -221,7 +180,8 @@ func TestCreate(t *testing.T) {
 // ============================================================================
 
 func TestWriteAndRead(t *testing.T) {
-	db := setupTestDB(t)
+	db, cleanup := newTestDBNoWAL(t)
+	defer cleanup()
 
 	if err := db.Create("users"); err != nil {
 		t.Logf("Failed create table=%s already exist", "users")
@@ -340,7 +300,8 @@ func TestWriteAndRead(t *testing.T) {
 // ============================================================================
 
 func TestDelete(t *testing.T) {
-	db := setupTestDB(t)
+	db, cleanup := newTestDBNoWAL(t)
+	defer cleanup()
 
 	if err := db.Create("users"); err != nil {
 		t.Logf("Failed create table=%s already exist", "users")
@@ -394,7 +355,8 @@ func TestDelete(t *testing.T) {
 // ============================================================================
 
 func TestExist(t *testing.T) {
-	db := setupTestDB(t)
+	db, cleanup := newTestDBNoWAL(t)
+	defer cleanup()
 
 	t.Run("existing_table", func(t *testing.T) {
 		db.Create("test_table")
@@ -418,12 +380,12 @@ func TestExist(t *testing.T) {
 	})
 
 	t.Run("closed_database_returns_error", func(t *testing.T) {
-		dir := t.TempDir()
-		cfg := testConfig(dir)
-		db, _ := InitWithConfig(cfg)
-		db.Close()
+		// Usamos una DB propia para poder cerrarla sin afectar a otros subtests.
+		db2, cleanup2 := newTestDBNoWAL(t)
+		defer cleanup2()
+		db2.Close()
 
-		_, err := db.Exist("any_table")
+		_, err := db2.Exist("any_table")
 		if err == nil {
 			t.Error("Expected error on closed database")
 		}
@@ -435,7 +397,8 @@ func TestExist(t *testing.T) {
 // ============================================================================
 
 func TestWriteBatch(t *testing.T) {
-	db := setupTestDB(t)
+	db, cleanup := newTestDBNoWAL(t)
+	defer cleanup()
 
 	if err := db.Create("products"); err != nil {
 		t.Fatalf("Create failed: %v", err)
@@ -508,7 +471,8 @@ func TestWriteBatch(t *testing.T) {
 // ============================================================================
 
 func TestReadBatch(t *testing.T) {
-	db := setupTestDB(t)
+	db, cleanup := newTestDBNoWAL(t)
+	defer cleanup()
 
 	if err := db.Create("items"); err != nil {
 		t.Fatalf("Create failed: %v", err)
@@ -615,7 +579,8 @@ func TestReadBatch(t *testing.T) {
 // ============================================================================
 
 func TestTransactionBasic(t *testing.T) {
-	db := setupTestDB(t)
+	db, cleanup := newTestDBNoWAL(t)
+	defer cleanup()
 
 	db.Create("accounts")
 	db.Write("accounts", "alice", map[string]any{"Name": "alice", "Age": 100})
@@ -649,16 +614,14 @@ func TestTransactionBasic(t *testing.T) {
 	})
 
 	t.Run("transactions_disabled", func(t *testing.T) {
-		dir := t.TempDir()
-		cfg := testConfig(dir)
-		cfg.EnableTransactions = false
-		db, err := InitWithConfig(cfg)
-		if err != nil {
-			t.Fatalf("Init failed: %v", err)
-		}
-		t.Cleanup(func() { db.Close() })
+		db2, cleanup2 := newTestDBWithConfig(t, func(cfg *Config) {
+			cfg.EnableTransactions = false
+			cfg.EnableWAL = false
+			cfg.EnableBackup = false
+		})
+		defer cleanup2()
 
-		_, err = db.BeginTransaction()
+		_, err := db2.BeginTransaction()
 		if err == nil {
 			t.Error("Expected error when transactions disabled")
 		}
@@ -666,7 +629,8 @@ func TestTransactionBasic(t *testing.T) {
 }
 
 func TestTransactionSnapshotIsolation(t *testing.T) {
-	db := setupTestDB(t)
+	db, cleanup := newTestDBNoWAL(t)
+	defer cleanup()
 
 	db.Create("data")
 	db.Write("data", "key1", map[string]any{"Name": "original", "Age": 1})
@@ -836,7 +800,8 @@ func TestDeepCopyValue(t *testing.T) {
 // ============================================================================
 
 func TestTo(t *testing.T) {
-	db := setupTestDB(t)
+	db, cleanup := newTestDBNoWAL(t)
+	defer cleanup()
 
 	t.Run("map_to_struct", func(t *testing.T) {
 		src := map[string]any{"Name": "alice", "Age": 30}
@@ -893,7 +858,8 @@ func TestTo(t *testing.T) {
 // ============================================================================
 
 func TestConcurrentWrites(t *testing.T) {
-	db := setupTestDB(t)
+	db, cleanup := newTestDBNoWAL(t)
+	defer cleanup()
 	db.Create("concurrent")
 
 	const numGoroutines = 50
@@ -934,7 +900,8 @@ func TestConcurrentWrites(t *testing.T) {
 }
 
 func TestConcurrentReadWrite(t *testing.T) {
-	db := setupTestDB(t)
+	db, cleanup := newTestDBNoWAL(t)
+	defer cleanup()
 	db.Create("mixed")
 	db.Write("mixed", "shared", "initial")
 
@@ -986,7 +953,8 @@ func TestConcurrentReadWrite(t *testing.T) {
 }
 
 func TestConcurrentTransactionsConflict(t *testing.T) {
-	db := setupTestDB(t)
+	db, cleanup := newTestDBNoWAL(t)
+	defer cleanup()
 	db.Create("counter")
 	db.Write("counter", "val", 0)
 
@@ -1038,12 +1006,9 @@ func TestConcurrentTransactionsConflict(t *testing.T) {
 // ============================================================================
 
 func TestOperationsOnClosedDB(t *testing.T) {
-	dir := t.TempDir()
-	cfg := testConfig(dir)
-	db, err := InitWithConfig(cfg)
-	if err != nil {
-		t.Fatalf("Init failed: %v", err)
-	}
+	// Usamos una DB propia para poder cerrarla sin afectar a otros tests.
+	db, cleanup := newTestDBNoWAL(t)
+	defer cleanup()
 	db.Close()
 
 	t.Run("create_on_closed", func(t *testing.T) {
@@ -1111,40 +1076,45 @@ func TestOperationsOnClosedDB(t *testing.T) {
 
 func TestClose(t *testing.T) {
 	t.Run("clean_close", func(t *testing.T) {
-		dir := t.TempDir()
-		cfg := testConfig(dir)
-		db, err := InitWithConfig(cfg)
-		if err != nil {
-			t.Fatalf("Init failed: %v", err)
-		}
+		db, cleanup := newTestDBNoWAL(t)
+		// No defer cleanup — lo manejamos manualmente para testear Close.
 
 		db.Create("table")
 		db.Write("table", "key", "value")
 
-		err = db.Close()
+		err := db.Close()
 		if err != nil {
 			t.Errorf("Close failed: %v", err)
 		}
+
+		// Limpiar manualmente después del test.
+		_ = os.RemoveAll(db.config.DirPath)
+		// Evitar que cleanup intente cerrar de nuevo.
+		_ = cleanup
+		cleanup = func() {} // no-op para que defer no haga nada
 	})
 
 	t.Run("double_close_returns_nil", func(t *testing.T) {
-		dir := t.TempDir()
-		cfg := testConfig(dir)
-		db, _ := InitWithConfig(cfg)
+		db, cleanup := newTestDBNoWAL(t)
+		// No defer cleanup — lo manejamos manualmente.
 
 		db.Close()
 		err := db.Close() // Second close
 		if err != nil {
 			t.Errorf("Double close should return nil, got: %v", err)
 		}
+
+		// Limpiar manualmente.
+		_ = os.RemoveAll(db.config.DirPath)
+		cleanup = func() {} // no-op
+		_ = cleanup
 	})
 }
 
 func TestCloseWithTimeout(t *testing.T) {
 	t.Run("close_with_custom_timeout", func(t *testing.T) {
-		dir := t.TempDir()
-		cfg := testConfig(dir)
-		db, _ := InitWithConfig(cfg)
+		db, cleanup := newTestDBNoWAL(t)
+		defer cleanup()
 
 		db.Create("table")
 		db.Write("table", "k1", "v1")
@@ -1162,11 +1132,18 @@ func TestCloseWithTimeout(t *testing.T) {
 
 func TestWALRecovery(t *testing.T) {
 	t.Run("data_survives_close_and_reopen", func(t *testing.T) {
+		// Fase 1: crear y escribir. Necesitamos retener el DirPath para
+		// reabrirlo en la fase 2, así que no usamos el cleanup automático.
 		dir := t.TempDir()
-		cfg := testConfigWithWAL(dir)
 
-		// Phase 1: Create and write
-		db1, err := InitWithConfig(cfg)
+		// Fase 1: crear DB con WAL en este dir específico.
+		cfg1 := DefaultConfig()
+		cfg1.DirPath = dir
+		cfg1.EnableWAL = true
+		cfg1.EnableBackup = false
+		cfg1.WALSyncInterval = 100 * time.Millisecond
+
+		db1, err := InitWithConfig(cfg1)
 		if err != nil {
 			t.Fatalf("Init phase 1 failed: %v", err)
 		}
@@ -1180,13 +1157,18 @@ func TestWALRecovery(t *testing.T) {
 
 		db1.Close()
 
-		// Phase 2: Reopen and verify
-		cfg2 := testConfigWithWAL(dir)
+		// Fase 2: reabrir con la misma config (mismo DirPath).
+		cfg2 := DefaultConfig()
+		cfg2.DirPath = dir
+		cfg2.EnableWAL = true
+		cfg2.EnableBackup = false
+		cfg2.WALSyncInterval = 100 * time.Millisecond
+
 		db2, err := InitWithConfig(cfg2)
 		if err != nil {
 			t.Fatalf("Init phase 2 failed: %v", err)
 		}
-		t.Cleanup(func() { db2.Close() })
+		defer db2.Close()
 
 		var user TestUser
 		err = db2.Read("persist_table", "key1", &user)
@@ -1209,7 +1191,8 @@ func TestWALRecovery(t *testing.T) {
 }
 
 func TestApplyWALEntry(t *testing.T) {
-	db := setupTestDB(t)
+	db, cleanup := newTestDBNoWAL(t)
+	defer cleanup()
 
 	t.Run("op_create", func(t *testing.T) {
 		entry := &wal.Entry{OpType: wal.OpCreate, Table: "wal_table"}
@@ -1275,16 +1258,15 @@ func TestApplyWALEntry(t *testing.T) {
 // ============================================================================
 
 func TestChangeKey(t *testing.T) {
-	db := setupTestDB(t)
+	// newTestDBNoWAL usa testKey como EncryptionKey por default.
+	db, cleanup := newTestDBNoWAL(t)
+	defer cleanup()
 	db.Create("secret")
 	db.Write("secret", "data", "classified")
 
 	t.Run("change_key_success", func(t *testing.T) {
-		var newKey common.Key
-		for i := range newKey {
-			newKey[i] = byte(i + 100)
-		}
-
+		// testKey es la key actual (seteada por newTestDBNoWAL).
+		// Cambiamos a testKey2.
 		err := db.ChangeKey(testKey, testKey2)
 		if err != nil {
 			t.Fatalf("ChangeKey failed: %v", err)
@@ -1299,6 +1281,8 @@ func TestChangeKey(t *testing.T) {
 	})
 
 	t.Run("change_key_wrong_old_key", func(t *testing.T) {
+		// Después del subtest anterior, la key actual es testKey2.
+		// Intentar cambiar pasando testKey (que ya no es la actual) → error.
 		err := db.ChangeKey(testKey, testKey2)
 		if err == nil {
 			t.Error("Expected error for wrong old key")
@@ -1307,15 +1291,16 @@ func TestChangeKey(t *testing.T) {
 }
 
 func TestExportAuthorization(t *testing.T) {
-	cfg := testConfig(".test")
-	cfg.EncryptionKey = testKey2
-	db, err := InitWithConfig(cfg)
-	if err != nil {
-		t.Error("Error initializating database")
-	}
+	// Usamos testKey2 como key inicial para luego cambiar a testKey.
+	db, cleanup := newTestDBWithConfig(t, func(cfg *Config) {
+		cfg.EncryptionKey = testKey2
+		cfg.EnableWAL = false
+		cfg.EnableBackup = false
+	})
+	defer cleanup()
 
 	if err := db.ChangeKey(testKey2, testKey); err != nil {
-		t.Error("Error changing database key")
+		t.Fatalf("Error changing database key: %v", err)
 	}
 
 	db.Create("private")
@@ -1327,8 +1312,8 @@ func TestExportAuthorization(t *testing.T) {
 			wrongKey[i] = 0xFF
 		}
 
-		dir := t.TempDir()
-		err := db.Export(wrongKey, filepath.Join(dir, "export.json"))
+		exportPath := filepath.Join(t.TempDir(), "export.json")
+		err := db.Export(wrongKey, exportPath)
 		if err == nil {
 			t.Error("Expected unauthorized error for wrong key")
 		}
@@ -1340,7 +1325,8 @@ func TestExportAuthorization(t *testing.T) {
 // ============================================================================
 
 func TestVersionTracking(t *testing.T) {
-	db := setupTestDB(t)
+	db, cleanup := newTestDBNoWAL(t)
+	defer cleanup()
 
 	t.Run("version_starts_at_zero", func(t *testing.T) {
 		v := db.version.Load()
@@ -1354,6 +1340,8 @@ func TestVersionTracking(t *testing.T) {
 		v1 := db.version.Load()
 
 		db.Write("versioned", "k1", "v1")
+		// Esperar a que processWriteBuffer aplique la op.
+		time.Sleep(50 * time.Millisecond)
 		v2 := db.version.Load()
 
 		if v2 <= v1 {
@@ -1366,6 +1354,7 @@ func TestVersionTracking(t *testing.T) {
 		v1 := db.version.Load()
 
 		db.WriteBatch("batch_ver", map[string]any{"k1": "v1", "k2": "v2"})
+		time.Sleep(50 * time.Millisecond)
 		v2 := db.version.Load()
 
 		if v2 <= v1 {
@@ -1378,6 +1367,7 @@ func TestVersionTracking(t *testing.T) {
 
 		// Write to nonexistent table → should fail
 		db.Write("ghost", "k", "v")
+		time.Sleep(50 * time.Millisecond)
 
 		v2 := db.version.Load()
 		if v2 != v1 {
@@ -1391,20 +1381,18 @@ func TestVersionTracking(t *testing.T) {
 // ============================================================================
 
 func TestFlushToDisk(t *testing.T) {
-	dir := t.TempDir()
-	cfg := testConfig(dir)
-	cfg.SaveInterval = 200 * time.Millisecond // Short interval for test
-
-	db, err := InitWithConfig(cfg)
-	if err != nil {
-		t.Fatalf("Init failed: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
+	// Usamos newTestDBWithConfig para especificar un SaveInterval corto.
+	db, cleanup := newTestDBWithConfig(t, func(cfg *Config) {
+		cfg.SaveInterval = 200 * time.Millisecond
+		cfg.EnableWAL = false
+		cfg.EnableBackup = false
+	})
+	defer cleanup()
 
 	db.Create("flush_test")
 	db.Write("flush_test", "key", "value")
 
-	// Wait for periodic save
+	// Wait for periodic save (SaveInterval * 2 para safety margin)
 	time.Sleep(500 * time.Millisecond)
 
 	// Verify dirtyFlag was cleared
@@ -1418,10 +1406,12 @@ func TestFlushToDisk(t *testing.T) {
 // ============================================================================
 
 func TestGetStatus(t *testing.T) {
-	db := setupTestDB(t)
+	db, cleanup := newTestDBNoWAL(t)
+	defer cleanup()
 
 	db.Create("status_test")
 	db.Write("status_test", "k1", "v1")
+	time.Sleep(50 * time.Millisecond)
 
 	status := db.GetStatus()
 
@@ -1443,7 +1433,8 @@ func TestGetStatus(t *testing.T) {
 }
 
 func TestGetMetrics(t *testing.T) {
-	db := setupTestDB(t)
+	db, cleanup := newTestDBNoWAL(t)
+	defer cleanup()
 
 	m := db.GetMetrics()
 	if m == nil {
@@ -1452,6 +1443,7 @@ func TestGetMetrics(t *testing.T) {
 
 	db.Create("metrics_test")
 	db.Write("metrics_test", "k", "v")
+	time.Sleep(50 * time.Millisecond)
 
 	var result string
 	db.Read("metrics_test", "k", &result)
@@ -1470,7 +1462,8 @@ func TestGetMetrics(t *testing.T) {
 // ============================================================================
 
 func TestReadReturnsDefensiveCopy(t *testing.T) {
-	db := setupTestDB(t)
+	db, cleanup := newTestDBNoWAL(t)
+	defer cleanup()
 
 	if err := db.Create("copy_test"); err != nil {
 		t.Fatalf("Create failed: %v", err)

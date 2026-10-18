@@ -162,6 +162,17 @@ func InitWithConfig(cfg *Config) (*Database, error) {
 		cfg = DefaultConfig()
 	}
 
+	// Recalcular BackupDir si el caller cambió DirPath del default.
+	//     // DefaultConfig setea BackupDir contra dir="data" (home-based).
+	//     // Si el caller overridea DirPath (absoluto o relativo), recalcular
+	//     // BackupDir para que sea consistente. Solo recalcular si el caller
+	//     // NO overrideó BackupDir explícitamente (BackupDir sigue siendo el
+	//     // default de "data").
+	defaultBackupDir := config.GetHomeSubDir("backups", "data")
+	if cfg.BackupDir == defaultBackupDir && cfg.DirPath != "data" {
+		cfg.BackupDir = config.GetHomeSubDir("backups", cfg.DirPath)
+	}
+
 	if err := validateConfig(cfg); err != nil {
 		return nil, fmt.Errorf("invalid config: %w", err)
 	}
@@ -727,10 +738,6 @@ func (db *Database) CommitTransaction(txn *tx.Transaction) error {
 	db.version.Add(1)
 	db.dirtyFlag.Store(true)
 	return nil
-}
-
-func (db *Database) Flush() error {
-	return db.flushToDisk()
 }
 
 // Background workers
