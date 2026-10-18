@@ -561,7 +561,7 @@ func (db *Database) ReadBatch(table string, dst any) error {
 
 	// Validar que dst es un puntero no-nil a un slice
 	dstVal := reflect.ValueOf(dst)
-	if dstVal.Kind() != reflect.Ptr || dstVal.IsNil() {
+	if dstVal.Kind() != reflect.Pointer || dstVal.IsNil() {
 		return fmt.Errorf("dst must be a non-nil pointer to a slice")
 	}
 
@@ -727,6 +727,10 @@ func (db *Database) CommitTransaction(txn *tx.Transaction) error {
 	db.version.Add(1)
 	db.dirtyFlag.Store(true)
 	return nil
+}
+
+func (db *Database) Flush() error {
+	return db.flushToDisk()
 }
 
 // Background workers
