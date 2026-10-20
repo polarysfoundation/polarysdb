@@ -1,5 +1,3 @@
----
-
 # 📜 Changelog
 
 All notable changes to this project will be documented in this file.
@@ -9,7 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-Changelog
+## [2.1.2] — 2026-10-20
+
+### Added
+- `gonum_test.go` — comprehensive test suite covering `*gonum.Number` round-trip through JSON serialization across same-session and new-session (flush + reload) scenarios. Covers `Read`, `ReadBatch` (`[]T` and `[]*T`), `WriteBatch`, and varied numeric formats (negative, decimal, large, zero, trailing zeros).
+- `simulateReload` test helper to force a flush + load cycle, exercising the JSON-normalized type path (`map[string]any`, `json.Number`, etc.) where mapper bugs surface.
+
+### Changed
+- Migrated `github.com/orislabsdev/gonum` from an in-repo module (`modules/gonum/`) to an external indirect dependency (`v0.0.0-20261020041937-181ccaf8ffcb`).
+- Bumped `go` directive from `1.23.3` to `1.27.2`.
+
+### Removed
+- In-tree `modules/gonum/` package (~2,600 LOC): `arithmetic.go`, `codec.go`, `comparision.go`, `constant.go`, `format.go`, `helpers.go`, `log.go`, `math.go`, `number.go`, and its `gonum_test.go`.
+
+### Notes
+- The `gonum` test suite exercises the mapper's handling of `*gonum.Number` at every nesting depth: top-level fields, nested structs, pointer-to-struct, slice-of-struct, and slice-of-pointer-to-struct.
+- `go.mod` now requires `github.com/orislabsdev/gonum` as an indirect dependency; run `go mod tidy` to confirm the requirement graph is consistent.
+
+---
 
 ## [2.1.1] — 2026-10-18
 
@@ -39,8 +54,8 @@ Changelog
 ### Added
 
 - Encryption and decryption of **WAL** entries if the encryption key is provided.
-- Validation of an empty key by checking for a non-zero value with `IsZero()`. 
-- Unit Tests for **WAL** Encryption and Decryption. 
+- Validation of an empty key by checking for a non-zero value with `IsZero()`. 
+- Unit Tests for **WAL** Encryption and Decryption. 
 
 
 
@@ -311,5 +326,3 @@ Changelog
 - Added thread-safe access to the database using sync.Mutex.
 
 ---
-
-

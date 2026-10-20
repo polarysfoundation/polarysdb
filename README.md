@@ -1,7 +1,7 @@
 # 🗄️ PolarysDB
 
-[![Version](https://img.shields.io/badge/version-2.1.1-blue.svg)](https://github.com/polarysfoundation/polarysdb/releases)
-[![Go Version](https://img.shields.io/badge/Go-1.21+-00ADD8?style=flat&logo=go)](https://golang.org/)
+[![Version](https://img.shields.io/badge/version-2.1.2-blue.svg)](https://github.com/polarysfoundation/polarysdb/releases)
+[![Go Version](https://img.shields.io/badge/Go-1.27+-00ADD8?style=flat&logo=go)](https://golang.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Protocol Buffers](https://img.shields.io/badge/Protocol_Buffers-3.0-4285F4?style=flat)](https://protobuf.dev/)
 
@@ -9,18 +9,16 @@
 
 PolarysDB is a high-performance, embedded database designed for Go applications that need reliability, security, and speed without the complexity of external database servers.
 
-## 🎯 v2.1.1 - WAL Durability & Rotation Fixes
+## 🎯 v2.1.2 - Arbitrary-Precision Numbers via `gonum`
 
-This is a **patch release** on top of v2.1.0 (WAL encryption). It closes three data-loss / race windows in the WAL and makes the snapshot flush verifiable end to end. **No API or on-disk format changes** — drop-in upgrade from v2.1.0.
+This release moves arbitrary-precision number support out of the core module and into the standalone [`orislabsdev/gonum`](https://github.com/orislabsdev/gonum) package, which the mapper now understands natively. Structs containing `*gonum.Number` fields round-trip correctly through `Read`, `ReadBatch`, `WriteBatch`, and across database reloads (JSON round-trip).
 
-Key fixes:
+Key changes:
 
-- **Periodic sync now flushes the `bufio.Writer` before `fsync`** — up to 256KB of acknowledged entries could previously be stranded in user space.
-- **WAL rotations are serialized** through a dedicated `rotateWatcher` worker gated by an atomic `rotating` flag — overlapping rotations that raced with `flushBatch`/`writeEntry` are eliminated.
-- **`Truncate()` waits for the write buffer to drain** before removing the file — queued entries are no longer silently dropped.
-- **New `Database.Flush()`** provides verifiable snapshot durability (pending ops → lock → save → reload+verify → WAL sync → clear dirty flag).
-- **New `WAL.Sync()`** for explicit synchronous durability (buffer drain → writer flush → fsync).
-- **Absolute `DirPath` is now honored**; `BackupDir` is recalculated when `DirPath` is overridden — no more state leaking into `~/data` in tests or absolute-path deployments.
+- **`*gonum.Number` is now a first-class mapper type.** Fields of type `*gonum.Number` are recognized and populated at any nesting level: top-level fields, nested structs, pointer-to-struct fields, slices of structs, and slices of pointers to structs.
+- **JSON round-trip safe.** After a `flush` → `load` cycle, stored values come back as `map[string]any` with JSON-typed primitives; the mapper reconstructs `*gonum.Number` from the stored string representation without precision loss.
+- **`modules/gonum` removed from the module.** The in-tree `gonum` package (arithmetic, comparison, constants, codec, formatting, log, math, helpers) has been deleted. Consumers should import `github.com/orislabsdev/gonum` directly.
+- **Go toolchain bumped to 1.27.2.** `go.mod` now requires Go `1.27.2` and pulls in `github.com/orislabsdev/gonum` as an indirect dependency.
 
 If upgrading from v1.x, see the [Migration Guide](#-migration-guide-v1--v2) below. Key changes:
 
@@ -55,8 +53,9 @@ If upgrading from v1.x, see the [Migration Guide](#-migration-guide-v1--v2) belo
 
 ### 🎯 Developer Experience
 - **Type-safe reads** with automatic mapper
+- **Arbitrary-precision numbers** via `gonum.Number` in the mapper
 - **Defensive copies** — modifying read values never corrupts internal state
-- **Zero dependencies** (except Go stdlib + protobuf)
+- **Zero dependencies** (except Go stdlib + protobuf + `gonum`)
 - **Embedded database** (no server required)
 - **Flexible configuration**
 
@@ -87,7 +86,7 @@ Real-world performance on MacBook Pro M1, 16GB RAM:
 ### Prerequisites
 
 ```bash
-# Go 1.19 or higher
+# Go 1.27 or higher
 go version
 
 # Protocol Buffers compiler
@@ -104,7 +103,7 @@ choco install protoc
 ### Installation
 
 ```bash
-go get github.com/polarysfoundation/polarysdb@v2.1.1
+go get github.com/polarysfoundation/polarysdb/v2@v2.1.2
 ```
 
 ### Basic Usage
@@ -116,8 +115,8 @@ import (
     "fmt"
     "log"
     
-    "github.com/polarysfoundation/polarysdb"
-    "github.com/polarysfoundation/polarysdb/modules/common"
+    "github.com/polarysfoundation/polarysdb/v2"
+    "github.com/polarysfoundation/polarysdb/v2/modules/common"
 )
 
 func main() {
@@ -194,7 +193,7 @@ cfg.Debug = true
 db, err := polarysdb.InitWithConfig(cfg)
 ```
 
-> **Path handling (v2.1.1):** `InitWithConfig` honors an absolute `DirPath` as-is. When `DirPath` is overridden from the default, `BackupDir` is recalculated to stay colocated with the data directory.
+> **Path handling:** `InitWithConfig` honors an absolute `DirPath` as-is. When `DirPath` is overridden from the default, `BackupDir` is recalculated to stay colocated with the data directory.
 
 ### Read with Mapper
 
@@ -222,6 +221,61 @@ var data map[string]any
 db.Read("products", "item1", &data)
 data["price"] = 0 // ✅ Safe — your copy only
 ```
+
+### Arbitrary-Precision Numbers with `gonum` (v2.1.2)
+
+PolarysDB's mapper natively understands `*gonum.Number` from
+[`github.com/orislabsdev/gonum`](https://github.com/orislabsdev/gonum). No
+extra registration or wrappers are required — declare the field and it just
+works, at every nesting level.
+
+```go
+import "github.com/orislabsdev/gonum"
+
+type GInner struct {
+    Balance *gonum.Number `json:"balance"`
+    Label   string        `json:"label"`
+}
+
+type GItem struct {
+    Code string        `json:"code"`
+    Qty  *gonum.Number `json:"qty"`
+}
+
+type GRec struct {
+    ID    string        `json:"id"`
+    Price *gonum.Number `json:"price"` // top-level field
+    Inner GInner        `json:"inner"` // nested struct
+    Ptr   *GInner       `json:"ptr"`   // pointer to nested struct
+    Items []GItem       `json:"items"` // slice of structs
+    Ptrs  []*GItem      `json:"ptrs"`  // slice of pointers to struct
+}
+
+rec := GRec{
+    ID:    "x1",
+    Price: gonum.New("858"),
+    Inner: GInner{Balance: gonum.New("50"), Label: "main"},
+    Ptr:   &GInner{Balance: gonum.New("25"), Label: "sub"},
+    Items: []GItem{{Code: "a", Qty: gonum.New("1")}},
+    Ptrs:  []*GItem{{Code: "c", Qty: gonum.New("3")}},
+}
+
+db.Write("recs", "k1", rec)
+
+// Read back — same session or after a reopen, both work.
+var out GRec
+db.Read("recs", "k1", &out)
+fmt.Println(out.Price.String()) // "858"
+```
+
+Supported numeric formats include integers (`"858"`), negatives (`"-100"`),
+decimals (`"3.14"`), large integers (`"99999999999999999999"`), and values
+with trailing zeros (`"1.500"` → normalized by `gonum`).
+
+> **Upgrading from earlier v2.x:** `modules/gonum` was removed from the
+> module. Replace imports of `github.com/polarysfoundation/polarysdb/v2/modules/gonum`
+> with `github.com/orislabsdev/gonum`. The API surface (`New`, `Number`,
+> arithmetic, comparison, JSON codec) is preserved.
 
 ### ReadBatch with Mapper
 
@@ -306,7 +360,7 @@ if err := db.WriteBatch("logs", batch); err != nil {
 }
 ```
 
-### Explicit Snapshot Flush (v2.1.1)
+### Explicit Snapshot Flush
 
 `Flush()` provides verifiable snapshot durability. It waits for pending 
 operations, takes the exclusive data lock, saves, reloads and verifies 
@@ -322,7 +376,7 @@ if err := db.Flush(); err != nil {
 }
 ```
 
-### Synchronous WAL Durability (v2.1.1)
+### Synchronous WAL Durability
 
 For workloads that need an explicit, synchronous durability point 
 without waiting for the periodic sync interval:
@@ -502,7 +556,7 @@ Transactions use optimistic concurrency via an atomic version counter:
 - `CommitTransaction` validates version hasn't changed
 - If version mismatch → conflict error → caller retries
 
-### WAL Durability Guarantees (v2.1.1)
+### WAL Durability Guarantees
 
 The WAL serializes the following operations to guarantee acknowledged 
 writes survive crashes:
@@ -517,6 +571,15 @@ writes survive crashes:
 - **Lock ordering** is consistent (`closeMutex → batchMutex`); `rotate()` 
   reuses the locked `flushBatchLocked` variant to avoid reentrancy.
 
+### Mapper and `gonum` (v2.1.2)
+
+The mapper walks the destination struct reflectively and recognizes
+`*gonum.Number` as a leaf type. When the source value is a string (as it
+is after a JSON round-trip), the mapper reconstructs the number via
+`gonum.New`; when the source is already a `*gonum.Number`, it is cloned.
+This is applied uniformly at every nesting depth (top-level, nested
+struct, pointer-to-struct, slice-of-struct, slice-of-pointer).
+
 ### Module Structure
 
 - **`polarysdb/`** - Core database implementation
@@ -524,10 +587,13 @@ writes survive crashes:
 - **`storage/`** - Storage engine with encryption
 - **`tx/`** - Transaction manager with optimistic concurrency
 - **`index/`** - Index manager (hash, btree)
-- **`mapper/`** - Type mapping (map → struct, primitives)
+- **`mapper/`** - Type mapping (map → struct, primitives, `*gonum.Number`)
 - **`metrics/`** - Real-time metrics collector
 - **`backup/`** - Automatic backup manager
 - **`encoding/`** - Serialization with type preservation
+
+> **Note (v2.1.2):** the in-tree `modules/gonum` package was removed. Use
+> [`github.com/orislabsdev/gonum`](https://github.com/orislabsdev/gonum) directly.
 
 ## 📖 API Reference
 
@@ -562,7 +628,7 @@ err := tx.Delete(table, key)
 err := db.CommitTransaction(tx)  // conflict detection
 err := tx.Rollback()
 
-// Durability (v2.1.1)
+// Durability
 err := db.Flush()                // verifiable snapshot flush
 err := db.WAL().Sync()           // explicit WAL sync
 
@@ -585,6 +651,8 @@ status := db.GetStatus()
 | Stored Type | Destination | Behavior |
 |-------------|-------------|---------|
 | `map[string]any` | `*Struct` | Mapper auto-maps fields |
+| `string` (from JSON) | `**gonum.Number` / `*gonum.Number` field | Reconstructed via `gonum.New` |
+| `*gonum.Number` | `*gonum.Number` field | Cloned |
 | `map[string]any` | `*map[string]any` | Deep copy (safe to modify) |
 | `int`, `string`, `bool` | `*int`, `*string`, `*bool` | Direct assignment |
 | `[]byte` | `*[]byte` | Deep copy |
@@ -595,8 +663,8 @@ status := db.GetStatus()
 ```go
 type Config struct {
     // Paths
-    DirPath   string   // Absolute paths honored as-is (v2.1.1)
-    BackupDir string   // Recalculated when DirPath is overridden (v2.1.1)
+    DirPath   string   // Absolute paths honored as-is
+    BackupDir string   // Recalculated when DirPath is overridden
     
     // Security
     EncryptionKey common.Key
@@ -768,7 +836,7 @@ db, _ := polarysdb.InitWithConfig(cfg)
 ### ✅ Version 2.1.0
 - [x] Encryption of WAL entries
 
-### ✅ Version 2.1.1 (Patch — Current)
+### ✅ Version 2.1.1
 - [x] Periodic sync flushes user-space buffer before `fsync`
 - [x] Serialized WAL rotations via atomic `rotating` flag
 - [x] `Truncate()` waits for buffer drain
@@ -776,6 +844,13 @@ db, _ := polarysdb.InitWithConfig(cfg)
 - [x] `WAL.Sync()` — explicit synchronous durability
 - [x] Absolute `DirPath` handling and backup colocation
 - [x] `reflect.Pointer` replacement for deprecated `reflect.Ptr`
+
+### ✅ Version 2.1.2 (Current)
+- [x] First-class `*gonum.Number` support in the mapper
+- [x] `*gonum.Number` round-trips through `Read`, `ReadBatch`, `WriteBatch`, and reloads
+- [x] `modules/gonum` removed in favor of `github.com/orislabsdev/gonum`
+- [x] Go toolchain bumped to `1.27.2`
+- [x] Comprehensive `gonum` mapper tests (`gonum_test.go`): same-session, new-session, batch value/pointer, numeric formats
 
 ### 🚧 Version 2.2.0 (In Progress)
 - [ ] Per-table versioning (reduce false conflicts)
@@ -822,6 +897,7 @@ Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for gui
 
 - Protocol Buffers team for the excellent serialization system
 - Go team for the language and standard library
+- [orislabsdev](https://github.com/orislabsdev) for the `gonum` package
 - Open source community for inspiration
 
 ## 📞 Support
@@ -849,6 +925,7 @@ If you find this project useful, please consider giving it a ⭐ on GitHub!
 - [PolarysDB CLI](https://github.com/polarysfoundation/polarysdb-cli) - Command-line interface
 - [PolarysDB GUI](https://github.com/polarysfoundation/polarysdb-gui) - Graphical interface
 - [PolarysDB SDK](https://github.com/polarysfoundation/polarysdb-sdk) - Multi-language bindings
+- [gonum](https://github.com/orislabsdev/gonum) - Arbitrary-precision numbers
 
 ---
 
